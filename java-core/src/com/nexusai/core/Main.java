@@ -50,5 +50,29 @@ public class Main {
 
         System.out.println("\nDownstream of API Gateway: "
                 + graph.findDownstreamServices(gateway.getId()));
+
+                LRUCache<String, Double> metricsCache =
+        new LRUCache<>(3);
+
+metricsCache.put("payment.cpu", 78.5);
+metricsCache.put("payment.memory", 82.1);
+metricsCache.put("gateway.latency", 145.0);
+
+System.out.println("\n=== Metrics Cache ===");
+System.out.println(
+        "Payment CPU: " + metricsCache.get("payment.cpu")
+);
+
+metricsCache.put("database.cpu", 91.2);
+
+System.out.println(
+        "Gateway latency cached: "
+        + metricsCache.containsKey("gateway.latency")
+);
+
+System.out.println(
+        "Payment memory cached: "
+        + metricsCache.containsKey("payment.memory")
+);
     }
 }

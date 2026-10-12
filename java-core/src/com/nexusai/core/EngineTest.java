@@ -1,8 +1,7 @@
 package com.nexusai.core;
 
-import java.util.Arrays;
-import java.util.List;
 import static com.nexusai.core.Incident.Severity.*;
+import java.util.Arrays;
 
 public class EngineTest {
 
