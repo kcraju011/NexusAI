@@ -46,6 +46,9 @@ public class Incident implements Comparable<Incident> {
     public LocalDateTime getCreatedAt() {
         return createdAt;
     }
+    public String getDescription() {
+    return description;
+}
 
     @Override
     public int compareTo(Incident other) {

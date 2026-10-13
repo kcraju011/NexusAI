@@ -13,6 +13,10 @@ public class ServiceGraph {
         graph.putIfAbsent(serviceId, new ArrayList<>());
     }
 
+    public boolean hasService(String serviceId) {
+        return graph.containsKey(serviceId);
+    }
+
     public void addDependency(
             String upstreamId,
             String downstreamId) {

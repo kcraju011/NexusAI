@@ -12,7 +12,7 @@ public class IncidentManager {
     private final Map<String, Incident> incidentsById =
             new HashMap<>();
 
-    public void reportIncident(Incident incident) {
+    public synchronized void reportIncident(Incident incident) {
         if (incident == null) {
             throw new IllegalArgumentException(
                     "Incident cannot be null"
@@ -29,11 +29,11 @@ public class IncidentManager {
         incidentsById.put(incident.getId(), incident);
     }
 
-    public Incident findIncidentById(String id) {
+    public synchronized Incident findIncidentById(String id) {
         return incidentsById.get(id);
     }
 
-    public Incident getNextIncident() {
+    public synchronized Incident getNextIncident() {
         Incident incident = incidents.poll();
 
         if (incident != null) {
@@ -43,11 +43,11 @@ public class IncidentManager {
         return incident;
     }
 
-    public boolean hasIncidents() {
+    public synchronized boolean hasIncidents() {
         return !incidents.isEmpty();
     }
 
-    public int getIncidentCount() {
+    public synchronized int getIncidentCount() {
         return incidentsById.size();
     }
 }
