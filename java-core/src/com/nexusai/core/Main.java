@@ -1,5 +1,7 @@
 package com.nexusai.core;
 
+import java.util.concurrent.atomic.AtomicInteger;
+
 import static com.nexusai.core.Incident.Severity.*;
 
 public class Main {
@@ -73,6 +75,36 @@ System.out.println(
 System.out.println(
         "Payment memory cached: "
         + metricsCache.containsKey("payment.memory")
+);
+System.out.println("\n=== Concurrent Processing ===");
+
+AtomicInteger processedCount = new AtomicInteger();
+
+try (ConcurrentIncidentProcessor processor =
+        new ConcurrentIncidentProcessor(
+                3, 20,
+                incident -> {
+                    processedCount.incrementAndGet();
+
+                    System.out.println(
+                            Thread.currentThread().getName()
+                            + " processed "
+                            + incident.getId()
+                    );
+                })) {
+
+    for (int i = 1; i <= 10; i++) {
+        processor.submit(new Incident(
+                "C" + i,
+                gateway,
+                "Concurrent test incident " + i,
+                Incident.Severity.HIGH
+        ));
+    }
+}
+
+System.out.println(
+        "Total processed: " + processedCount.get()
 );
     }
 }

@@ -4,16 +4,21 @@ import java.util.*;
 
 public class ServiceGraph {
 
+    // Insertion order makes demonstrations predictable.
     private final Map<String, List<String>> graph =
-            new HashMap<>();
+            new LinkedHashMap<>();
 
     public void addService(String serviceId) {
+        validateId(serviceId);
         graph.putIfAbsent(serviceId, new ArrayList<>());
     }
 
     public void addDependency(
             String upstreamId,
             String downstreamId) {
+
+        validateId(upstreamId);
+        validateId(downstreamId);
 
         if (!graph.containsKey(upstreamId)
                 || !graph.containsKey(downstreamId)) {
@@ -35,6 +40,15 @@ public class ServiceGraph {
         }
     }
 
+    private void validateId(String id) {
+        if (id == null || id.isBlank()) {
+            throw new IllegalArgumentException(
+                    "Service ID cannot be blank"
+            );
+        }
+    }
+
+    // BFS: finds all services reachable from a starting service.
     public List<String> findDownstreamServices(
             String startingServiceId) {
 
@@ -63,5 +77,70 @@ public class ServiceGraph {
         visited.remove(startingServiceId);
 
         return new ArrayList<>(visited);
+    }
+
+    // Kahn's algorithm: returns upstream-before-downstream order.
+    // Throws an exception if the graph contains a cycle.
+    public List<String> topologicalSort() {
+
+        Map<String, Integer> indegree = new LinkedHashMap<>();
+
+        for (String serviceId : graph.keySet()) {
+            indegree.put(serviceId, 0);
+        }
+
+        for (List<String> dependencies : graph.values()) {
+            for (String dependency : dependencies) {
+                indegree.put(
+                        dependency,
+                        indegree.get(dependency) + 1
+                );
+            }
+        }
+
+        Queue<String> ready = new ArrayDeque<>();
+
+        for (String serviceId : graph.keySet()) {
+            if (indegree.get(serviceId) == 0) {
+                ready.offer(serviceId);
+            }
+        }
+
+        List<String> order = new ArrayList<>();
+
+        while (!ready.isEmpty()) {
+            String current = ready.poll();
+            order.add(current);
+
+            for (String neighbor : graph.get(current)) {
+                int newIndegree = indegree.get(neighbor) - 1;
+                indegree.put(neighbor, newIndegree);
+
+                if (newIndegree == 0) {
+                    ready.offer(neighbor);
+                }
+            }
+        }
+
+        if (order.size() != graph.size()) {
+            throw new IllegalStateException(
+                    "Cannot sort services: dependency cycle detected"
+            );
+        }
+
+        return order;
+    }
+
+    public boolean hasCycle() {
+        try {
+            topologicalSort();
+            return false;
+        } catch (IllegalStateException exception) {
+            return true;
+        }
+    }
+
+    public int getServiceCount() {
+        return graph.size();
     }
 }
