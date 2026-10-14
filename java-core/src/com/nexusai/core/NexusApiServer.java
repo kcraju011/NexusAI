@@ -21,6 +21,7 @@ import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
 
 public class NexusApiServer implements AutoCloseable {
+    
 
     private final PostgresIncidentRepository repository;
     private static final int MAX_BODY_BYTES = 64 * 1024;
@@ -35,6 +36,7 @@ public class NexusApiServer implements AutoCloseable {
     private final IncidentManager incidentManager;
     private final ServiceGraph serviceGraph;
     private final ConcurrentIncidentProcessor processor;
+    private final AuthService authService;
 
     public NexusApiServer(
        
@@ -42,13 +44,15 @@ public class NexusApiServer implements AutoCloseable {
         IncidentManager incidentManager,
         ServiceGraph serviceGraph,
         ConcurrentIncidentProcessor processor,
-        PostgresIncidentRepository repository)
+        PostgresIncidentRepository repository,
+        AuthService authService)
         throws IOException {
 
     this.incidentManager = incidentManager;
     this.serviceGraph = serviceGraph;
     this.processor = processor;
     this.repository = repository;
+    this.authService = authService;
         server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", port), 0);
 
@@ -68,6 +72,8 @@ public class NexusApiServer implements AutoCloseable {
     private void handleRequest(HttpExchange exchange)
             throws IOException {
 
+                
+
         try {
             Headers headers = exchange.getResponseHeaders();
 
@@ -81,14 +87,59 @@ public class NexusApiServer implements AutoCloseable {
 
             headers.set(
                 "Access-Control-Allow-Headers",
-                "Content-Type");
+                "Content-Type, Authorization");
 
             headers.set("Vary", "Origin");
+            headers.set(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+);
 
             if ("OPTIONS".equals(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
             return;
             }
+
+                String method = exchange.getRequestMethod();
+                String path = exchange.getRequestURI().getPath();
+
+                boolean publicHealth =
+                    "GET".equals(method) && "/api/health".equals(path);
+
+                boolean loginRequest =
+                    "POST".equals(method) && "/api/auth/login".equals(path);
+
+                if (publicHealth) {
+                route(exchange);
+                return;
+                }
+
+                if (loginRequest) {
+                handleLogin(exchange);
+                return;
+                }
+
+                String token = bearerToken(exchange);
+                AuthService.AuthenticatedUser user =
+                    authService.authenticate(token);
+
+                if (user == null) {
+                sendJson(exchange, 401,
+                    "{\"error\":\"Authentication required or session expired\"}");
+                return;
+                }
+
+                if ("POST".equals(method) && "/api/auth/logout".equals(path)) {
+                handleLogout(exchange, token);
+                return;
+                }
+
+                if (user.role() != AuthService.Role.ADMIN
+                    && !"GET".equals(method)) {
+                sendJson(exchange, 403,
+                    "{\"error\":\"Insufficient permissions\"}");
+                return;
+                }
 
             route(exchange);
         } catch (IllegalArgumentException exception) {
@@ -101,6 +152,7 @@ public class NexusApiServer implements AutoCloseable {
         } finally {
             exchange.close();
         }
+
     }
 
     private void route(HttpExchange exchange)
@@ -448,4 +500,53 @@ private void sendJson(
         server.stop(1);
         httpExecutor.shutdown();
     }
+
+
+private String bearerToken(HttpExchange exchange) {
+    String header = exchange.getRequestHeaders()
+            .getFirst("Authorization");
+
+    if (header == null || !header.startsWith("Bearer ")) {
+        return null;
+    }
+
+    String token = header.substring("Bearer ".length()).trim();
+    return token.isEmpty() ? null : token;
+}
+
+private void handleLogin(HttpExchange exchange) throws IOException {
+    try {
+        String body = readBody(exchange);
+        Map<String, String> data = parseJson(body);
+
+        String username = required(data, "username");
+        String password = required(data, "password");
+
+        String token = authService.login(username, password);
+
+        if (token == null) {
+            sendJson(exchange, 401,
+                    "{\"error\":\"Invalid username or password\"}");
+            return;
+        }
+
+        sendJson(exchange, 200,
+                "{\"token\":" + quote(token)
+                        + ",\"tokenType\":\"Bearer\""
+                        + ",\"expiresIn\":1800}");
+
+    } catch (IllegalArgumentException exception) {
+        sendJson(exchange, 400,
+                "{\"error\":\"Invalid login request\"}");
+    }
+}
+
+private void handleLogout(
+        HttpExchange exchange,
+        String token
+) throws IOException {
+    authService.logout(token);
+    sendJson(exchange, 200, "{\"message\":\"Logged out\"}");
+}
+
 }

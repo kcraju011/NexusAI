@@ -27,6 +27,27 @@ public class ApiMain {
                 new PostgresIncidentRepository(
                         url, username, password);
 
+        String adminUsername =
+                System.getenv("NEXUS_ADMIN_USERNAME");
+        String adminPassword =
+                System.getenv("NEXUS_ADMIN_PASSWORD");
+        String viewerUsername =
+                System.getenv("NEXUS_VIEWER_USERNAME");
+        String viewerPassword =
+                System.getenv("NEXUS_VIEWER_PASSWORD");
+
+        if (adminUsername == null || adminPassword == null
+                || viewerUsername == null || viewerPassword == null) {
+            throw new IllegalStateException(
+                    "Configure all four NEXUS_* authentication environment variables.");
+        }
+
+        AuthService authService = new AuthService(
+                adminUsername,
+                adminPassword,
+                viewerUsername,
+                viewerPassword);
+
         ConcurrentIncidentProcessor processor =
                 new ConcurrentIncidentProcessor(
                         2, 100,
@@ -34,6 +55,7 @@ public class ApiMain {
                                 "Analyzing incident: "
                                         + incident.getId()));
 
+        int port = 8080;
         NexusApiServer server;
 
         try {
@@ -41,11 +63,12 @@ public class ApiMain {
             repository.count();
 
             server = new NexusApiServer(
-                    8080,
+                    port,
                     manager,
                     graph,
                     processor,
-                    repository
+                                        repository,
+                                        authService
                 );
 
             server.start();

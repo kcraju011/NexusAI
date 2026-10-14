@@ -5,6 +5,8 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.util.UUID;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public class NexusApiServerTest {
 
@@ -20,10 +22,15 @@ public class NexusApiServerTest {
             String baseUrl,
             String method,
             String path,
-            String body) throws Exception {
+                        String body,
+                        String token) throws Exception {
 
         HttpRequest.Builder builder = HttpRequest.newBuilder()
                 .uri(URI.create(baseUrl + path));
+
+                if (token != null) {
+                        builder.header("Authorization", "Bearer " + token);
+                }
 
         if (body != null) {
             builder.header("Content-Type", "application/json")
@@ -46,6 +53,9 @@ public class NexusApiServerTest {
                         requiredEnv("NEXUS_DB_URL"),
                         requiredEnv("NEXUS_DB_USER"),
                         requiredEnv("NEXUS_DB_PASSWORD"));
+        AuthService authService = new AuthService(
+                "test-admin", "test-admin-password",
+                "test-viewer", "test-viewer-password");
 
         IncidentManager manager = new IncidentManager();
         ServiceGraph graph = new ServiceGraph();
@@ -67,7 +77,8 @@ public class NexusApiServerTest {
                              1, 10, incident -> { });
              NexusApiServer server =
                      new NexusApiServer(
-                             0, manager, graph, processor, repository)) {
+                             0, manager, graph, processor,
+                             repository, authService)) {
 
             server.start();
 
@@ -78,14 +89,37 @@ public class NexusApiServerTest {
 
             HttpResponse<String> health = request(
                     client, baseUrl, "GET",
-                    "/api/health", null);
+                    "/api/health", null, null);
 
             check(health.statusCode() == 200,
                     "Health should return 200");
 
+            HttpResponse<String> unauthenticated = request(
+                    client, baseUrl, "GET",
+                    "/api/incidents", null, null);
+
+            check(unauthenticated.statusCode() == 401,
+                    "Incident listing should require authentication");
+
+            HttpResponse<String> login = request(
+                    client, baseUrl, "POST",
+                    "/api/auth/login",
+                    "{\"username\":\"test-admin\","
+                            + "\"password\":\"test-admin-password\"}",
+                    null);
+
+            check(login.statusCode() == 200,
+                    "Admin login should return 200");
+
+            Matcher tokenMatcher = Pattern.compile(
+                    "\"token\":\"([^\"]+)\"")
+                    .matcher(login.body());
+            check(tokenMatcher.find(), "Login response should include a token");
+            String adminToken = tokenMatcher.group(1);
+
             HttpResponse<String> created = request(
                     client, baseUrl, "POST",
-                    "/api/incidents", body);
+                    "/api/incidents", body, adminToken);
 
             check(created.statusCode() == 201,
                     "Creation should return 201");
@@ -99,7 +133,7 @@ public class NexusApiServerTest {
 
             HttpResponse<String> fetched = request(
                     client, baseUrl, "GET",
-                    "/api/incidents/" + incidentId, null);
+                    "/api/incidents/" + incidentId, null, adminToken);
 
             check(fetched.statusCode() == 200,
                     "Retrieval should return 200");
@@ -109,7 +143,7 @@ public class NexusApiServerTest {
 
             HttpResponse<String> duplicate = request(
                     client, baseUrl, "POST",
-                    "/api/incidents", body);
+                    "/api/incidents", body, adminToken);
 
             check(duplicate.statusCode() == 409,
                     "Duplicate ID should return 409");
@@ -120,7 +154,8 @@ public class NexusApiServerTest {
                     "{\"id\":\"T2\","
                     + "\"serviceId\":\"S001\","
                     + "\"description\":\"Bad severity\","
-                    + "\"severity\":\"URGENT\"}");
+                    + "\"severity\":\"URGENT\"}",
+                    adminToken);
 
             check(invalid.statusCode() == 400,
                     "Invalid severity should return 400");
@@ -131,21 +166,22 @@ public class NexusApiServerTest {
                     "{\"id\":\"T3\","
                     + "\"serviceId\":\"S999\","
                     + "\"description\":\"Unknown service\","
-                    + "\"severity\":\"HIGH\"}");
+                    + "\"severity\":\"HIGH\"}",
+                    adminToken);
 
             check(invalidService.statusCode() == 404,
                     "Unknown service should return 404");
 
             HttpResponse<String> missing = request(
                     client, baseUrl, "GET",
-                    "/api/incidents/MISSING", null);
+                    "/api/incidents/MISSING", null, adminToken);
 
             check(missing.statusCode() == 404,
                     "Missing incident should return 404");
 
             HttpResponse<String> downstream = request(
                     client, baseUrl, "GET",
-                    "/api/services/S001/downstream", null);
+                    "/api/services/S001/downstream", null, adminToken);
 
             check(downstream.statusCode() == 200
                             && downstream.body().contains("S002"),
@@ -153,10 +189,54 @@ public class NexusApiServerTest {
 
             HttpResponse<String> analysis = request(
                     client, baseUrl, "POST",
-                    "/api/incidents/" + incidentId + "/analyze", "{}");
+                    "/api/incidents/" + incidentId + "/analyze", "{}",
+                    adminToken);
 
             check(analysis.statusCode() == 202,
                     "Analysis should return 202");
+
+            HttpResponse<String> viewerLogin = request(
+                    client, baseUrl, "POST",
+                    "/api/auth/login",
+                    "{\"username\":\"test-viewer\","
+                            + "\"password\":\"test-viewer-password\"}",
+                    null);
+            Matcher viewerTokenMatcher = Pattern.compile(
+                    "\"token\":\"([^\"]+)\"")
+                    .matcher(viewerLogin.body());
+
+            check(viewerLogin.statusCode() == 200
+                            && viewerTokenMatcher.find(),
+                    "Viewer login should return a token");
+            String viewerToken = viewerTokenMatcher.group(1);
+
+            HttpResponse<String> viewerRead = request(
+                    client, baseUrl, "GET",
+                    "/api/incidents", null, viewerToken);
+
+            check(viewerRead.statusCode() == 200,
+                    "Viewer reads should be allowed");
+
+            HttpResponse<String> viewerWrite = request(
+                    client, baseUrl, "POST",
+                    "/api/incidents", body, viewerToken);
+
+            check(viewerWrite.statusCode() == 403,
+                    "Viewer writes should be forbidden");
+
+            HttpResponse<String> logout = request(
+                    client, baseUrl, "POST",
+                    "/api/auth/logout", null, viewerToken);
+
+            check(logout.statusCode() == 200,
+                    "Authenticated viewer should be able to log out");
+
+            HttpResponse<String> afterLogout = request(
+                    client, baseUrl, "GET",
+                    "/api/incidents", null, viewerToken);
+
+            check(afterLogout.statusCode() == 401,
+                    "Logged-out tokens should no longer be accepted");
 
             System.out.println(
                     "All NexusAI HTTP API tests passed!");
