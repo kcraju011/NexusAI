@@ -6,47 +6,54 @@ public class ApiMain {
 
     public static void main(String[] args) throws IOException {
 
-        IncidentManager incidentManager =
-                new IncidentManager();
+        String url = requiredEnv("NEXUS_DB_URL");
+        String username = requiredEnv("NEXUS_DB_USER");
+        String password = requiredEnv("NEXUS_DB_PASSWORD");
 
-        ServiceGraph serviceGraph = new ServiceGraph();
+        IncidentManager manager = new IncidentManager();
 
-        serviceGraph.addService("S001"); // API Gateway
-        serviceGraph.addService("S002"); // Payment
-        serviceGraph.addService("S003"); // Database
-        serviceGraph.addService("S004"); // Notifications
+        ServiceGraph graph = new ServiceGraph();
 
-        serviceGraph.addDependency("S001", "S002");
-        serviceGraph.addDependency("S002", "S003");
-        serviceGraph.addDependency("S001", "S004");
+        graph.addService("S001");
+        graph.addService("S002");
+        graph.addService("S003");
+        graph.addService("S004");
+
+        graph.addDependency("S001", "S002");
+        graph.addDependency("S002", "S003");
+        graph.addDependency("S001", "S004");
+
+        PostgresIncidentRepository repository =
+                new PostgresIncidentRepository(
+                        url, username, password);
 
         ConcurrentIncidentProcessor processor =
                 new ConcurrentIncidentProcessor(
-                        2,
-                        100,
+                        2, 100,
                         incident -> System.out.println(
-                                "Analyzing incident "
-                                        + incident.getId()
-                                        + " on "
-                                        + Thread.currentThread().getName()
-                        )
-                );
+                                "Analyzing incident: "
+                                        + incident.getId()));
 
         NexusApiServer server;
 
         try {
+            // Verify connectivity before accepting requests.
+            repository.count();
+
             server = new NexusApiServer(
                     8080,
-                    incidentManager,
-                    serviceGraph,
-                    processor
-            );
+                    manager,
+                    graph,
+                    processor,
+                    repository
+                );
 
             server.start();
 
-        } catch (IOException | RuntimeException exception) {
+        } catch (Exception exception) {
             processor.close();
-            throw exception;
+            throw new IOException(
+                    "Failed to start NexusAI API", exception);
         }
 
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
@@ -56,6 +63,16 @@ public class ApiMain {
 
         System.out.println(
                 "NexusAI API running at http://localhost:8080");
-        System.out.println("Press Ctrl+C to stop.");
+        }
+
+        private static String requiredEnv(String name) {
+                String value = System.getenv(name);
+
+                if (value == null || value.isBlank()) {
+                        throw new IllegalStateException(
+                                        "Missing environment variable: " + name);
+                }
+
+                return value;
     }
 }

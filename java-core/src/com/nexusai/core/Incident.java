@@ -39,6 +39,10 @@ public class Incident implements Comparable<Incident> {
         return id;
     }
 
+    public Service getService() {
+        return service;
+    }
+
     public Severity getSeverity() {
         return severity;
     }

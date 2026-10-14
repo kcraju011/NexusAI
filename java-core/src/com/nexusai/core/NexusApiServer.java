@@ -1,12 +1,10 @@
 package com.nexusai.core;
 
-import com.nexusai.core.Incident.Severity;
-import com.sun.net.httpserver.HttpExchange;
-import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.sql.SQLException;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -17,8 +15,14 @@ import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
+import com.nexusai.core.Incident.Severity;
+import com.sun.net.httpserver.Headers;
+import com.sun.net.httpserver.HttpExchange;
+import com.sun.net.httpserver.HttpServer;
+
 public class NexusApiServer implements AutoCloseable {
 
+    private final PostgresIncidentRepository repository;
     private static final int MAX_BODY_BYTES = 64 * 1024;
 
     private static final Pattern JSON_FIELD = Pattern.compile(
@@ -33,16 +37,18 @@ public class NexusApiServer implements AutoCloseable {
     private final ConcurrentIncidentProcessor processor;
 
     public NexusApiServer(
-            int port,
-            IncidentManager incidentManager,
-            ServiceGraph serviceGraph,
-            ConcurrentIncidentProcessor processor)
-            throws IOException {
+       
+     int port,
+        IncidentManager incidentManager,
+        ServiceGraph serviceGraph,
+        ConcurrentIncidentProcessor processor,
+        PostgresIncidentRepository repository)
+        throws IOException {
 
-        this.incidentManager = incidentManager;
-        this.serviceGraph = serviceGraph;
-        this.processor = processor;
-
+    this.incidentManager = incidentManager;
+    this.serviceGraph = serviceGraph;
+    this.processor = processor;
+    this.repository = repository;
         server = HttpServer.create(
                 new InetSocketAddress("127.0.0.1", port), 0);
 
@@ -63,6 +69,27 @@ public class NexusApiServer implements AutoCloseable {
             throws IOException {
 
         try {
+            Headers headers = exchange.getResponseHeaders();
+
+            headers.set(
+                "Access-Control-Allow-Origin",
+                "http://localhost:5173");
+
+            headers.set(
+                "Access-Control-Allow-Methods",
+                "GET, POST, OPTIONS");
+
+            headers.set(
+                "Access-Control-Allow-Headers",
+                "Content-Type");
+
+            headers.set("Vary", "Origin");
+
+            if ("OPTIONS".equals(exchange.getRequestMethod())) {
+            exchange.sendResponseHeaders(204, -1);
+            return;
+            }
+
             route(exchange);
         } catch (IllegalArgumentException exception) {
             sendJson(exchange, 400, error(exception.getMessage()));
@@ -77,7 +104,7 @@ public class NexusApiServer implements AutoCloseable {
     }
 
     private void route(HttpExchange exchange)
-            throws IOException {
+            throws IOException, SQLException {
 
         String method = exchange.getRequestMethod();
         String path = exchange.getRequestURI().getPath();
@@ -91,6 +118,12 @@ public class NexusApiServer implements AutoCloseable {
         if ("POST".equals(method)
                 && "/api/incidents".equals(path)) {
             createIncident(exchange);
+            return;
+        }
+
+        if ("GET".equals(method)
+                && "/api/incidents".equals(path)) {
+            listIncidents(exchange);
             return;
         }
 
@@ -143,78 +176,102 @@ public class NexusApiServer implements AutoCloseable {
         }
     }
 
-    private void createIncident(HttpExchange exchange)
-            throws IOException {
+  private void createIncident(HttpExchange exchange)
+        throws IOException, SQLException {
 
-        String body = readBody(exchange);
-        Map<String, String> fields = parseJson(body);
+    String body = readBody(exchange);
+    Map<String, String> fields = parseJson(body);
 
-        String id = required(fields, "id");
-        String serviceId = required(fields, "serviceId");
-        String description = required(fields, "description");
-        String severityText = required(fields, "severity");
+    String id = required(fields, "id");
+    String serviceId = required(fields, "serviceId");
+    String description = required(fields, "description");
+    String severityText = required(fields, "severity");
 
-        if (!serviceGraph.hasService(serviceId)) {
-            sendJson(exchange, 404,
+    if (!serviceGraph.hasService(serviceId)) {
+        sendJson(exchange, 404,
                 error("Service not found"));
-            return;
-        }
-
-        final Severity severity;
-
-        try {
-            severity = Severity.valueOf(
-                    severityText.toUpperCase(java.util.Locale.ROOT));
-        } catch (IllegalArgumentException exception) {
-            sendJson(exchange, 400,
-                    error("Severity must be CRITICAL, HIGH, MEDIUM or LOW"));
-            return;
-        }
-
-        Incident incident = new Incident(
-            id,
-            new Service(serviceId, serviceId),
-            description,
-            severity);
-
-        try {
-            incidentManager.reportIncident(incident);
-        } catch (IllegalArgumentException exception) {
-            if (incidentManager.findIncidentById(id) != null) {
-                sendJson(exchange, 409,
-                        error("Incident ID already exists"));
-            } else {
-                sendJson(exchange, 400,
-                        error(exception.getMessage()));
-            }
-            return;
-        }
-
-        sendJson(exchange, 201, incidentJson(incident));
+        return;
     }
 
-    private void getIncident(
+    final Severity severity;
+
+    try {
+        severity = Severity.valueOf(
+                severityText.toUpperCase(
+                        java.util.Locale.ROOT));
+    } catch (IllegalArgumentException exception) {
+        sendJson(exchange, 400,
+                error("Invalid incident severity"));
+        return;
+    }
+
+    Incident incident = new Incident(
+            id, new Service(serviceId, serviceId),
+            description, severity);
+
+    // Persist first. PostgreSQL enforces unique IDs.
+    try {
+        repository.save(incident);
+    } catch (SQLException exception) {
+        if ("23505".equals(exception.getSQLState())) {
+            sendJson(exchange, 409,
+                    error("Incident ID already exists"));
+            return;
+        }
+
+        throw exception;
+    }
+
+    // Update the in-memory scheduling and lookup structures.
+    incidentManager.reportIncident(incident);
+
+    sendJson(exchange, 201, incidentJson(incident));
+}
+
+    private void listIncidents(HttpExchange exchange)
+            throws IOException, SQLException {
+
+        List<Incident> incidents = repository.findAll();
+        List<String> values = new ArrayList<>();
+
+        for (Incident incident : incidents) {
+            values.add(incidentJson(incident));
+        }
+
+        sendJson(exchange, 200,
+                "[" + String.join(",", values) + "]");
+    }
+
+ private void getIncident(
+        HttpExchange exchange, String id)
+        throws IOException, SQLException {
+
+    Incident incident =
+            incidentManager.findIncidentById(id);
+
+    if (incident == null) {
+        incident = repository.findById(id).orElse(null);
+    }
+
+    if (incident == null) {
+        sendJson(exchange, 404,
+                error("Incident not found"));
+        return;
+    }
+
+    sendJson(exchange, 200, incidentJson(incident));
+}
+
+    private void analyzeIncident(
             HttpExchange exchange, String id)
-            throws IOException {
+            throws IOException, SQLException {
 
         Incident incident =
                 incidentManager.findIncidentById(id);
 
         if (incident == null) {
-            sendJson(exchange, 404,
-                    error("Incident not found"));
-            return;
+            incident = repository.findById(id).orElse(null);
         }
-
-        sendJson(exchange, 200, incidentJson(incident));
-    }
-
-    private void analyzeIncident(
-            HttpExchange exchange, String id)
-            throws IOException {
-
-        Incident incident =
-                incidentManager.findIncidentById(id);
 
         if (incident == null) {
             sendJson(exchange, 404,
@@ -331,6 +388,8 @@ public class NexusApiServer implements AutoCloseable {
     private String incidentJson(Incident incident) {
         return "{"
                 + "\"id\":" + quote(incident.getId()) + ","
+            + "\"serviceId\":"
+            + quote(incident.getService().getId()) + ","
                 + "\"description\":"
                 + quote(incident.getDescription()) + ","
                 + "\"severity\":"
