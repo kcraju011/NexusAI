@@ -1,0 +1,73 @@
+name: NexusAI CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+jobs:
+  java-backend:
+    name: Java backend tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+          cache: maven
+
+      - name: Compile, test, and package backend
+        working-directory: java-core
+        run: mvn --batch-mode --no-transfer-progress clean verify
+
+      - name: Upload Java build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexusai-java-artifact
+          path: java-core/target/*.jar
+          if-no-files-found: error
+          retention-days: 7
+
+  react-frontend:
+    name: React frontend checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: nexusai-dashboard/package-lock.json
+
+      - name: Install dependencies
+        working-directory: nexusai-dashboard
+        run: npm ci
+
+      - name: Lint frontend
+        working-directory: nexusai-dashboard
+        run: npm run lint
+
+      - name: Build frontend
+        working-directory: nexusai-dashboard
+        run: npm run build
+
+      - name: Upload React build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: nexusai-react-dist
+          path: nexusai-dashboard/dist/
+          if-no-files-found: error
+          retention-days: 7
