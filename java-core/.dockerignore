@@ -1,0 +1,5 @@
+target/
+out/
+classpath.txt
+.env
+logs/

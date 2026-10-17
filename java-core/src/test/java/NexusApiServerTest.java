@@ -77,7 +77,10 @@ public class NexusApiServerTest {
                              1, 10, incident -> { });
              NexusApiServer server =
                      new NexusApiServer(
-                             0, manager, graph, processor,
+                             0, manager, graph,
+                             new AuditLogger(java.nio.file.Path.of(
+                                     "target", "test-audit.jsonl")),
+                             processor,
                              repository, authService)) {
 
             server.start();

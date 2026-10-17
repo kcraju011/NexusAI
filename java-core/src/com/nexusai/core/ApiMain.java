@@ -11,6 +11,8 @@ public class ApiMain {
         String password = requiredEnv("NEXUS_DB_PASSWORD");
 
         IncidentManager manager = new IncidentManager();
+        AuditLogger auditLogger =
+        new AuditLogger(java.nio.file.Path.of("logs", "audit.jsonl"));
 
         ServiceGraph graph = new ServiceGraph();
 
@@ -66,9 +68,10 @@ public class ApiMain {
                     port,
                     manager,
                     graph,
+                    auditLogger,
                     processor,
-                                        repository,
-                                        authService
+                    repository,
+                    authService
                 );
 
             server.start();

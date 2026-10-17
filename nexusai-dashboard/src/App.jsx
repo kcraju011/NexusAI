@@ -28,14 +28,24 @@ async function apiRequest(path, options = {}) {
     throw new Error("The server returned an invalid response.");
   }
 
-  if (!response.ok) {
-    throw new Error(
-      data?.error || `Request failed with status ${response.status}`
-    );
-  }
+if (!response.ok) {
+  const requestId =
+    data?.requestId || response.headers.get("X-Request-ID");
+
+  const message =
+    data?.error || `Request failed with status ${response.status}`;
+
+  throw new Error(
+    requestId ? `${message} (Request ID: ${requestId})` : message
+  );
+}
 
   return data;
-}
+  }
+
+ 
+
+
 
 
 

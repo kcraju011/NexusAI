@@ -2,5 +2,13 @@
 out/
 target/
 .env
+.env.*
+!.env.example
+logs/
+java-core/target/
+java-core/out/
+java-core/classpath.txt
+nexusai-dashboard/node_modules/
+nexusai-dashboard/dist/
 .idea/
 .vscode/

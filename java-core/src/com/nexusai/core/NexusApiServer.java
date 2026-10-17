@@ -32,7 +32,7 @@ public class NexusApiServer implements AutoCloseable {
 
     private final HttpServer server;
     private final ExecutorService httpExecutor;
-
+    private final AuditLogger auditLogger;
     private final IncidentManager incidentManager;
     private final ServiceGraph serviceGraph;
     private final ConcurrentIncidentProcessor processor;
@@ -42,7 +42,7 @@ public class NexusApiServer implements AutoCloseable {
        
      int port,
         IncidentManager incidentManager,
-        ServiceGraph serviceGraph,
+        ServiceGraph serviceGraph, AuditLogger auditLogger,
         ConcurrentIncidentProcessor processor,
         PostgresIncidentRepository repository,
         AuthService authService)
@@ -50,11 +50,12 @@ public class NexusApiServer implements AutoCloseable {
 
     this.incidentManager = incidentManager;
     this.serviceGraph = serviceGraph;
+    this.auditLogger = auditLogger;
     this.processor = processor;
     this.repository = repository;
     this.authService = authService;
         server = HttpServer.create(
-                new InetSocketAddress("127.0.0.1", port), 0);
+                new InetSocketAddress("0.0.0.0", port), 0);
 
         httpExecutor = Executors.newFixedThreadPool(4);
         server.setExecutor(httpExecutor);
@@ -72,7 +73,17 @@ public class NexusApiServer implements AutoCloseable {
     private void handleRequest(HttpExchange exchange)
             throws IOException {
 
-                
+        String requestId = RequestContext.start(
+            exchange.getRequestHeaders().getFirst("X-Request-ID")
+        );
+        exchange.getResponseHeaders().set("X-Request-ID", requestId);
+        long requestStartedAt = System.nanoTime();
+        String method = exchange.getRequestMethod();
+        String path = exchange.getRequestURI().getPath();
+        AppLogger.info(
+            "request_started",
+            method + " " + path
+        );
 
         try {
             Headers headers = exchange.getResponseHeaders();
@@ -87,21 +98,18 @@ public class NexusApiServer implements AutoCloseable {
 
             headers.set(
                 "Access-Control-Allow-Headers",
-                "Content-Type, Authorization");
+                "Content-Type, Authorization, X-Request-ID");
 
             headers.set("Vary", "Origin");
             headers.set(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization"
+    "Content-Type, Authorization, X-Request-ID"
 );
 
             if ("OPTIONS".equals(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
             return;
             }
-
-                String method = exchange.getRequestMethod();
-                String path = exchange.getRequestURI().getPath();
 
                 boolean publicHealth =
                     "GET".equals(method) && "/api/health".equals(path);
@@ -110,7 +118,7 @@ public class NexusApiServer implements AutoCloseable {
                     "POST".equals(method) && "/api/auth/login".equals(path);
 
                 if (publicHealth) {
-                route(exchange);
+                route(exchange, null);
                 return;
                 }
 
@@ -124,8 +132,16 @@ public class NexusApiServer implements AutoCloseable {
                     authService.authenticate(token);
 
                 if (user == null) {
-                sendJson(exchange, 401,
-                    "{\"error\":\"Authentication required or session expired\"}");
+                AppLogger.warn(
+                        "authentication_rejected",
+                        "Authentication required or session expired"
+                );
+                ApiErrors.send(
+                        exchange,
+                        401,
+                        "UNAUTHORIZED",
+                        "Authentication required or session expired"
+                );
                 return;
                 }
 
@@ -136,26 +152,70 @@ public class NexusApiServer implements AutoCloseable {
 
                 if (user.role() != AuthService.Role.ADMIN
                     && !"GET".equals(method)) {
-                sendJson(exchange, 403,
-                    "{\"error\":\"Insufficient permissions\"}");
+                auditLogger.record(
+                        user.username(),
+                        "AUTHORIZATION_DENIED",
+                        path,
+                        "DENIED"
+                );
+                ApiErrors.send(
+                        exchange,
+                        403,
+                        "FORBIDDEN",
+                        "Insufficient permissions"
+                );
                 return;
                 }
 
-            route(exchange);
-        } catch (IllegalArgumentException exception) {
-            sendJson(exchange, 400, error(exception.getMessage()));
-        } catch (Exception exception) {
-            exception.printStackTrace();
+            route(exchange, user);
+        } catch (ApiException exception) {
+            AppLogger.warn(
+                    "request_rejected",
+                    "API request rejected with code " + exception.getCode()
+            );
 
-            sendJson(exchange, 500,
-                    error("Internal server error"));
+            if (exchange.getResponseCode() == -1) {
+                ApiErrors.send(
+                        exchange,
+                        exception.getStatus(),
+                        exception.getCode(),
+                        exception.getMessage()
+                );
+            }
+        } catch (Exception exception) {
+            AppLogger.error(
+                    "request_failed",
+                    "Unexpected API error",
+                    exception
+            );
+
+            if (exchange.getResponseCode() == -1) {
+                ApiErrors.send(
+                        exchange,
+                        500,
+                        "INTERNAL_ERROR",
+                        "An unexpected server error occurred"
+                );
+            }
         } finally {
+            long durationMillis = java.util.concurrent.TimeUnit.NANOSECONDS
+                .toMillis(System.nanoTime() - requestStartedAt);
+            AppLogger.info(
+                "request_completed",
+                method + " " + path
+                    + " status=" + exchange.getResponseCode()
+                    + " durationMs=" + durationMillis
+            );
+            RequestContext.clear();
             exchange.close();
         }
 
     }
 
-    private void route(HttpExchange exchange)
+        private void route(
+            HttpExchange exchange,
+            AuthService.AuthenticatedUser user
+        )
             throws IOException, SQLException {
 
         String method = exchange.getRequestMethod();
@@ -169,7 +229,7 @@ public class NexusApiServer implements AutoCloseable {
 
         if ("POST".equals(method)
                 && "/api/incidents".equals(path)) {
-            createIncident(exchange);
+            createIncident(exchange, user);
             return;
         }
 
@@ -200,7 +260,7 @@ public class NexusApiServer implements AutoCloseable {
                     path.length() - "/analyze".length());
 
             if (!id.isBlank() && !id.contains("/")) {
-                analyzeIncident(exchange, id);
+                analyzeIncident(exchange, id, user);
                 return;
             }
         }
@@ -228,7 +288,10 @@ public class NexusApiServer implements AutoCloseable {
         }
     }
 
-  private void createIncident(HttpExchange exchange)
+  private void createIncident(
+      HttpExchange exchange,
+      AuthService.AuthenticatedUser user
+  )
         throws IOException, SQLException {
 
     String body = readBody(exchange);
@@ -252,9 +315,11 @@ public class NexusApiServer implements AutoCloseable {
                 severityText.toUpperCase(
                         java.util.Locale.ROOT));
     } catch (IllegalArgumentException exception) {
-        sendJson(exchange, 400,
-                error("Invalid incident severity"));
-        return;
+        throw new ApiException(
+            400,
+            "INVALID_REQUEST",
+            "Invalid incident severity"
+        );
     }
 
     Incident incident = new Incident(
@@ -276,6 +341,13 @@ public class NexusApiServer implements AutoCloseable {
 
     // Update the in-memory scheduling and lookup structures.
     incidentManager.reportIncident(incident);
+
+        auditLogger.record(
+            user.username(),
+            "INCIDENT_CREATE",
+            id,
+            "SUCCESS"
+        );
 
     sendJson(exchange, 201, incidentJson(incident));
 }
@@ -315,7 +387,10 @@ public class NexusApiServer implements AutoCloseable {
 }
 
     private void analyzeIncident(
-            HttpExchange exchange, String id)
+            HttpExchange exchange,
+            String id,
+            AuthService.AuthenticatedUser user
+        )
             throws IOException, SQLException {
 
         Incident incident =
@@ -338,6 +413,13 @@ public class NexusApiServer implements AutoCloseable {
                     error("Analysis queue is full or shutting down"));
             return;
         }
+
+            auditLogger.record(
+                user.username(),
+                "INCIDENT_ANALYZE",
+                id,
+                "SUCCESS"
+            );
 
         sendJson(exchange, 202,
                 "{\"status\":\"ACCEPTED\",\"incidentId\":"
@@ -382,8 +464,11 @@ public class NexusApiServer implements AutoCloseable {
         }
 
         if (bytes.length > MAX_BODY_BYTES) {
-            throw new IllegalArgumentException(
-                    "Request body exceeds 64 KB");
+            throw new ApiException(
+                413,
+                "REQUEST_TOO_LARGE",
+                "Request body exceeds 64 KB"
+            );
         }
 
         return new String(bytes, StandardCharsets.UTF_8);
@@ -394,8 +479,11 @@ public class NexusApiServer implements AutoCloseable {
 
         if (!trimmed.startsWith("{")
                 || !trimmed.endsWith("}")) {
-            throw new IllegalArgumentException(
-                    "Expected a JSON object");
+            throw new ApiException(
+                400,
+                "INVALID_REQUEST",
+                "Expected a JSON object"
+            );
         }
 
         Map<String, String> fields = new HashMap<>();
@@ -408,8 +496,11 @@ public class NexusApiServer implements AutoCloseable {
         }
 
         if (fields.isEmpty()) {
-            throw new IllegalArgumentException(
-                    "JSON object has no recognized string fields");
+            throw new ApiException(
+                400,
+                "INVALID_REQUEST",
+                "JSON object has no recognized string fields"
+            );
         }
 
         return fields;
@@ -421,8 +512,11 @@ public class NexusApiServer implements AutoCloseable {
         String value = fields.get(key);
 
         if (value == null || value.isBlank()) {
-            throw new IllegalArgumentException(
-                    "Missing required field: " + key);
+            throw new ApiException(
+                400,
+                "INVALID_REQUEST",
+                "Missing required field: " + key
+            );
         }
 
         return value;
@@ -525,10 +619,27 @@ private void handleLogin(HttpExchange exchange) throws IOException {
         String token = authService.login(username, password);
 
         if (token == null) {
-            sendJson(exchange, 401,
-                    "{\"error\":\"Invalid username or password\"}");
+            auditLogger.record(
+                username,
+                "LOGIN",
+                "AUTH",
+                "FAILURE"
+            );
+            ApiErrors.send(
+                exchange,
+                401,
+                "UNAUTHORIZED",
+                "Invalid username or password"
+            );
             return;
         }
+
+        auditLogger.record(
+            username,
+            "LOGIN",
+            "AUTH",
+            "SUCCESS"
+        );
 
         sendJson(exchange, 200,
                 "{\"token\":" + quote(token)
