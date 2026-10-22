@@ -20,12 +20,23 @@ services:
       retries: 20
       start_period: 10s
 
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build:
       context: ./java-core
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
+      REDIS_URI: redis://redis:6379
       NEXUS_DB_URL: jdbc:postgresql://postgres:5432/${POSTGRES_DB}
       NEXUS_DB_USER: ${POSTGRES_USER}
       NEXUS_DB_PASSWORD: ${POSTGRES_PASSWORD}
@@ -39,6 +50,8 @@ services:
       - ./logs:/app/logs
     depends_on:
       postgres:
+        condition: service_healthy
+      redis:
         condition: service_healthy
 
   dashboard:

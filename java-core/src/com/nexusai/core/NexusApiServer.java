@@ -9,6 +9,7 @@ import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
@@ -37,6 +38,8 @@ public class NexusApiServer implements AutoCloseable {
     private final ServiceGraph serviceGraph;
     private final ConcurrentIncidentProcessor processor;
     private final AuthService authService;
+    private final RedisIncidentCache incidentCache;
+    private final RedisRateLimiter rateLimiter;
 
     public NexusApiServer(
        
@@ -45,7 +48,9 @@ public class NexusApiServer implements AutoCloseable {
         ServiceGraph serviceGraph, AuditLogger auditLogger,
         ConcurrentIncidentProcessor processor,
         PostgresIncidentRepository repository,
-        AuthService authService)
+        AuthService authService,
+    RedisIncidentCache incidentCache,
+RedisRateLimiter rateLimiter)
         throws IOException {
 
     this.incidentManager = incidentManager;
@@ -54,6 +59,8 @@ public class NexusApiServer implements AutoCloseable {
     this.processor = processor;
     this.repository = repository;
     this.authService = authService;
+    this.incidentCache = incidentCache;
+this.rateLimiter = rateLimiter;
         server = HttpServer.create(
                 new InetSocketAddress("0.0.0.0", port), 0);
 
@@ -105,6 +112,29 @@ public class NexusApiServer implements AutoCloseable {
     "Access-Control-Allow-Headers",
     "Content-Type, Authorization, X-Request-ID"
 );
+
+            if (!"/api/health".equals(path)) {
+                String clientIp = exchange.getRemoteAddress()
+                        .getAddress()
+                        .getHostAddress();
+
+                boolean allowed;
+
+                try {
+                    allowed = rateLimiter.allow(clientIp);
+                } catch (RuntimeException redisFailure) {
+                    sendJson(exchange, 503,
+                            "{\"error\":\"Rate limiting temporarily unavailable\"}");
+                    return;
+                }
+
+                if (!allowed) {
+                    exchange.getResponseHeaders().set("Retry-After", "60");
+                    sendJson(exchange, 429,
+                            "{\"error\":\"Too many requests\"}");
+                    return;
+                }
+            }
 
             if ("OPTIONS".equals(exchange.getRequestMethod())) {
             exchange.sendResponseHeaders(204, -1);
@@ -370,7 +400,32 @@ public class NexusApiServer implements AutoCloseable {
         HttpExchange exchange, String id)
         throws IOException, SQLException {
 
-    Incident incident =
+            Optional<Incident> cached = incidentCache.get(id);
+
+if (cached.isPresent()) {
+    sendJson(exchange, 200, incidentJson(cached.get()));
+    return;
+}
+
+Optional<Incident> fromDatabase = repository.findById(id);
+
+if (fromDatabase.isEmpty()) {
+    sendJson(exchange, 404, "{\"error\":\"Incident not found\"}");
+    return;
+}
+
+Incident incident = fromDatabase.get();
+
+try {
+    incidentCache.put(incident);
+} catch (RuntimeException cacheFailure) {
+    // Cache is an optimization, not the source of truth.
+    // Log the failure using your existing AppLogger.
+}
+
+sendJson(exchange, 200, incidentJson(incident));
+
+    incident =
             incidentManager.findIncidentById(id);
 
     if (incident == null) {

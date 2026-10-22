@@ -57,6 +57,14 @@ public class ApiMain {
                                 "Analyzing incident: "
                                         + incident.getId()));
 
+        String redisUri = requiredEnv("REDIS_URI");
+
+RedisIncidentCache incidentCache =
+        new RedisIncidentCache(redisUri);
+
+RedisRateLimiter rateLimiter =
+        new RedisRateLimiter(redisUri, 60, 60);
+
         int port = 8080;
         NexusApiServer server;
 
@@ -71,7 +79,9 @@ public class ApiMain {
                     auditLogger,
                     processor,
                     repository,
-                    authService
+                    authService,
+                    incidentCache,
+                    rateLimiter
                 );
 
             server.start();
@@ -85,6 +95,8 @@ public class ApiMain {
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
             server.close();
             processor.close();
+            rateLimiter.close();
+            incidentCache.close();
         }));
 
         System.out.println(

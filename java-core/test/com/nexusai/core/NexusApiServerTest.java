@@ -72,16 +72,26 @@ public class NexusApiServerTest {
                 + "\"description\":\"Test incident\","
                 + "\"severity\":\"HIGH\"}";
 
+        String redisUri = System.getenv("REDIS_URI");
+        if (redisUri == null || redisUri.isBlank()) {
+            redisUri = "redis://localhost:6379";
+        }
+
         try (ConcurrentIncidentProcessor processor =
                      new ConcurrentIncidentProcessor(
                              1, 10, incident -> { });
+             RedisIncidentCache incidentCache =
+                     new RedisIncidentCache(redisUri);
+             RedisRateLimiter rateLimiter =
+                     new RedisRateLimiter(redisUri, 60, 60);
              NexusApiServer server =
                      new NexusApiServer(
                              0, manager, graph,
                              new AuditLogger(java.nio.file.Path.of(
                                      "target", "test-audit.jsonl")),
                              processor,
-                             repository, authService)) {
+                             repository, authService,
+                             incidentCache, rateLimiter)) {
 
             server.start();
 
