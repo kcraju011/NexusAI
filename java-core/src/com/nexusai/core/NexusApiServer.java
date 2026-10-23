@@ -40,6 +40,7 @@ public class NexusApiServer implements AutoCloseable {
     private final AuthService authService;
     private final RedisIncidentCache incidentCache;
     private final RedisRateLimiter rateLimiter;
+    private final MetricsRegistry metrics;
 
     public NexusApiServer(
        
@@ -50,7 +51,8 @@ public class NexusApiServer implements AutoCloseable {
         PostgresIncidentRepository repository,
         AuthService authService,
     RedisIncidentCache incidentCache,
-RedisRateLimiter rateLimiter)
+RedisRateLimiter rateLimiter,
+MetricsRegistry metrics)
         throws IOException {
 
     this.incidentManager = incidentManager;
@@ -61,12 +63,23 @@ RedisRateLimiter rateLimiter)
     this.authService = authService;
     this.incidentCache = incidentCache;
 this.rateLimiter = rateLimiter;
+this.metrics = metrics;
         server = HttpServer.create(
                 new InetSocketAddress("0.0.0.0", port), 0);
 
         httpExecutor = Executors.newFixedThreadPool(4);
         server.setExecutor(httpExecutor);
-        server.createContext("/", this::handleRequest);
+        server.createContext("/", exchange -> {
+            long started = System.nanoTime();
+
+            try {
+                handleRequest(exchange);
+            } finally {
+                int status = exchange.getResponseCode();
+                metrics.recordRequest(status, System.nanoTime() - started);
+                exchange.close();
+            }
+        });
     }
 
     public void start() {
@@ -129,6 +142,7 @@ this.rateLimiter = rateLimiter;
                 }
 
                 if (!allowed) {
+                    metrics.recordRateLimitRejection();
                     exchange.getResponseHeaders().set("Retry-After", "60");
                     sendJson(exchange, 429,
                             "{\"error\":\"Too many requests\"}");
@@ -144,10 +158,13 @@ this.rateLimiter = rateLimiter;
                 boolean publicHealth =
                     "GET".equals(method) && "/api/health".equals(path);
 
+                boolean publicMetrics =
+                    "GET".equals(method) && "/api/metrics".equals(path);
+
                 boolean loginRequest =
                     "POST".equals(method) && "/api/auth/login".equals(path);
 
-                if (publicHealth) {
+                if (publicHealth || publicMetrics) {
                 route(exchange, null);
                 return;
                 }
@@ -237,7 +254,6 @@ this.rateLimiter = rateLimiter;
                     + " durationMs=" + durationMillis
             );
             RequestContext.clear();
-            exchange.close();
         }
 
     }
@@ -254,6 +270,23 @@ this.rateLimiter = rateLimiter;
         if ("GET".equals(method) && "/api/health".equals(path)) {
             sendJson(exchange, 200,
                     "{\"status\":\"UP\",\"service\":\"NexusAI\"}");
+            return;
+        }
+
+        if ("GET".equals(method) && "/api/metrics".equals(path)) {
+            byte[] body = metrics.toPrometheusFormat()
+                    .getBytes(java.nio.charset.StandardCharsets.UTF_8);
+
+            exchange.getResponseHeaders().set(
+                    "Content-Type",
+                    "text/plain; version=0.0.4; charset=utf-8"
+            );
+
+            exchange.sendResponseHeaders(200, body.length);
+
+            try (var output = exchange.getResponseBody()) {
+                output.write(body);
+            }
             return;
         }
 
@@ -280,6 +313,8 @@ this.rateLimiter = rateLimiter;
                 return;
             }
         }
+
+
 
         if ("POST".equals(method)
                 && path.startsWith("/api/incidents/")
@@ -396,50 +431,40 @@ this.rateLimiter = rateLimiter;
                 "[" + String.join(",", values) + "]");
     }
 
- private void getIncident(
+    private void getIncident(
         HttpExchange exchange, String id)
         throws IOException, SQLException {
 
-            Optional<Incident> cached = incidentCache.get(id);
+        Optional<Incident> cached = incidentCache.get(id);
 
-if (cached.isPresent()) {
-    sendJson(exchange, 200, incidentJson(cached.get()));
-    return;
-}
+        if (cached.isPresent()) {
+            metrics.recordCacheHit();
+            sendJson(exchange, 200, incidentJson(cached.get()));
+            return;
+        }
 
-Optional<Incident> fromDatabase = repository.findById(id);
+        metrics.recordCacheMiss();
+        Optional<Incident> fromDatabase = repository.findById(id);
 
-if (fromDatabase.isEmpty()) {
-    sendJson(exchange, 404, "{\"error\":\"Incident not found\"}");
-    return;
-}
+        if (fromDatabase.isEmpty()) {
+            sendJson(exchange, 404, "{\"error\":\"Incident not found\"}");
+            return;
+        }
 
-Incident incident = fromDatabase.get();
+        Incident incident = fromDatabase.get();
 
-try {
-    incidentCache.put(incident);
-} catch (RuntimeException cacheFailure) {
-    // Cache is an optimization, not the source of truth.
-    // Log the failure using your existing AppLogger.
-}
+        try {
+            incidentCache.put(incident);
+        } catch (RuntimeException cacheFailure) {
+            AppLogger.error(
+                    "incident_cache_write_failed",
+                    "Incident cache update failed; returning database result",
+                    cacheFailure
+            );
+        }
 
-sendJson(exchange, 200, incidentJson(incident));
-
-    incident =
-            incidentManager.findIncidentById(id);
-
-    if (incident == null) {
-        incident = repository.findById(id).orElse(null);
+        sendJson(exchange, 200, incidentJson(incident));
     }
-
-    if (incident == null) {
-        sendJson(exchange, 404,
-                error("Incident not found"));
-        return;
-    }
-
-    sendJson(exchange, 200, incidentJson(incident));
-}
 
     private void analyzeIncident(
             HttpExchange exchange,

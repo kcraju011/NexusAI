@@ -91,7 +91,8 @@ public class NexusApiServerTest {
                                      "target", "test-audit.jsonl")),
                              processor,
                              repository, authService,
-                             incidentCache, rateLimiter)) {
+                             incidentCache, rateLimiter,
+                             new MetricsRegistry())) {
 
             server.start();
 

@@ -1,6 +1,13 @@
 package com.nexusai.core;
 
 import java.io.IOException;
+import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.Map;
+import java.util.UUID;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
 
 public class ApiMain {
 
@@ -28,6 +35,62 @@ public class ApiMain {
         PostgresIncidentRepository repository =
                 new PostgresIncidentRepository(
                         url, username, password);
+
+        MetricsRegistry metrics = new MetricsRegistry();
+        Map<String, String> activeAlertIncidents = new HashMap<>();
+        ReliabilityMonitor monitor = new ReliabilityMonitor(
+                metrics,
+                event -> {
+                    System.out.printf(
+                            "[ALERT] rule=%s state=%s severity=%s message=%s%n",
+                            event.ruleId(),
+                            event.state(),
+                            event.severity(),
+                            event.message()
+                    );
+
+                    if (event.state() == ReliabilityMonitor.State.FIRING) {
+                        if (activeAlertIncidents.containsKey(event.ruleId())) {
+                            return;
+                        }
+
+                        String incidentId = "alert-" + UUID.randomUUID();
+                        Incident incident = new Incident(
+                                incidentId,
+                                new Service("S001", "S001"),
+                                "[" + event.ruleId() + "] " + event.message(),
+                                event.severity()
+                        );
+
+                        try {
+                            repository.save(incident);
+                        } catch (SQLException exception) {
+                            throw new IllegalStateException(
+                                    "Failed to persist alert incident "
+                                            + incidentId,
+                                    exception
+                            );
+                        }
+
+                        manager.reportIncident(incident);
+                        activeAlertIncidents.put(
+                                event.ruleId(), incidentId);
+                    } else {
+                        String incidentId =
+                                activeAlertIncidents.remove(event.ruleId());
+                        System.out.printf(
+                                "[ALERT] recovery observed rule=%s incident=%s; "
+                                        + "incident status is unchanged because "
+                                        + "the incident model has no resolution lifecycle%n",
+                                event.ruleId(),
+                                incidentId == null ? "none" : incidentId
+                        );
+                    }
+                },
+                20,
+                0.05,
+                0.20
+        );
 
         String adminUsername =
                 System.getenv("NEXUS_ADMIN_USERNAME");
@@ -81,7 +144,8 @@ RedisRateLimiter rateLimiter =
                     repository,
                     authService,
                     incidentCache,
-                    rateLimiter
+                    rateLimiter,
+                    metrics
                 );
 
             server.start();
@@ -92,7 +156,41 @@ RedisRateLimiter rateLimiter =
                     "Failed to start NexusAI API", exception);
         }
 
+        ScheduledExecutorService reliabilityScheduler =
+                Executors.newSingleThreadScheduledExecutor(runnable -> {
+                    Thread thread = new Thread(
+                            runnable, "nexusai-reliability-monitor");
+                    thread.setDaemon(true);
+                    return thread;
+                });
+
+        reliabilityScheduler.scheduleWithFixedDelay(
+                () -> {
+                    try {
+                        monitor.evaluate();
+                    } catch (RuntimeException exception) {
+                        System.err.println(
+                                "Reliability evaluation failed: "
+                                        + exception.getMessage()
+                        );
+                    }
+                },
+                15,
+                15,
+                TimeUnit.SECONDS
+        );
+
         Runtime.getRuntime().addShutdownHook(new Thread(() -> {
+            reliabilityScheduler.shutdown();
+            try {
+                if (!reliabilityScheduler.awaitTermination(
+                        5, TimeUnit.SECONDS)) {
+                    reliabilityScheduler.shutdownNow();
+                }
+            } catch (InterruptedException exception) {
+                reliabilityScheduler.shutdownNow();
+                Thread.currentThread().interrupt();
+            }
             server.close();
             processor.close();
             rateLimiter.close();

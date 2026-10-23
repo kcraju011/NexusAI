@@ -1,0 +1,43 @@
+
+groups:
+  - name: nexusai-reliability
+    rules:
+      - alert: NexusAIHighServerErrorRate
+        expr: |
+          (
+            rate(nexusai_http_server_errors_total[5m])
+            /
+            clamp_min(rate(nexusai_http_requests_total[5m]), 0.000001)
+          ) > 0.05
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "NexusAI server error rate is high"
+          description: "More than 5% of recent requests are returning HTTP 5xx responses."
+
+      - alert: NexusAIHighRequestLatency
+        expr: |
+          (
+            1 -
+            (
+              rate(nexusai_http_request_duration_seconds_bucket{le="0.25"}[5m])
+              /
+              clamp_min(rate(nexusai_http_request_duration_seconds_count[5m]), 0.000001)
+            )
+          ) > 0.20
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "NexusAI requests are slow"
+          description: "More than 20% of recent requests are taking longer than 250 ms."
+
+      - alert: NexusAIMetricsUnavailable
+        expr: up{job="nexusai-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Prometheus cannot scrape the NexusAI API"
+          description: "The NexusAI metrics endpoint has been unavailable for at least one minute."
