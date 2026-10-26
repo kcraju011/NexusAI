@@ -44,7 +44,37 @@ public class ConcurrentIncidentProcessor
         Objects.requireNonNull(
                 incident, "Incident cannot be null");
 
-        executor.execute(() -> handler.accept(incident));
+        String traceId = Tracing.currentTraceId();
+
+        executor.execute(() -> {
+            String previousTraceId = Tracing.currentTraceId();
+
+            try {
+                Tracing.endRequest();
+
+                if ("no-active-trace".equals(traceId)) {
+                    handler.accept(incident);
+                    return;
+                }
+
+                Tracing.beginRequest(traceId);
+                try (Tracing.Span span =
+                             Tracing.startSpan("incident.process")) {
+                    try {
+                        handler.accept(incident);
+                    } catch (RuntimeException exception) {
+                        span.fail(exception);
+                        throw exception;
+                    }
+                }
+            } finally {
+                Tracing.endRequest();
+
+                if (!"no-active-trace".equals(previousTraceId)) {
+                    Tracing.beginRequest(previousTraceId);
+                }
+            }
+        });
     }
 
     public int getPendingTaskCount() {

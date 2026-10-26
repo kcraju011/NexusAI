@@ -73,7 +73,7 @@ this.metrics = metrics;
             long started = System.nanoTime();
 
             try {
-                handleRequest(exchange);
+                handleTraced(exchange);
             } finally {
                 int status = exchange.getResponseCode();
                 metrics.recordRequest(status, System.nanoTime() - started);
@@ -88,6 +88,26 @@ this.metrics = metrics;
 
     public int getPort() {
         return server.getAddress().getPort();
+    }
+
+    private void handleTraced(HttpExchange exchange)
+            throws IOException {
+
+        String traceId = Tracing.beginRequest(
+                exchange.getRequestHeaders().getFirst("X-Trace-Id")
+        );
+        exchange.getResponseHeaders().set("X-Trace-Id", traceId);
+
+        try (Tracing.Span span = Tracing.startSpan("http.request")) {
+            try {
+                handleRequest(exchange);
+            } catch (IOException | RuntimeException exception) {
+                span.fail(exception);
+                throw exception;
+            }
+        } finally {
+            Tracing.endRequest();
+        }
     }
 
     private void handleRequest(HttpExchange exchange)
@@ -118,12 +138,12 @@ this.metrics = metrics;
 
             headers.set(
                 "Access-Control-Allow-Headers",
-                "Content-Type, Authorization, X-Request-ID");
+                "Content-Type, Authorization, X-Request-ID, X-Trace-Id");
 
             headers.set("Vary", "Origin");
             headers.set(
     "Access-Control-Allow-Headers",
-    "Content-Type, Authorization, X-Request-ID"
+    "Content-Type, Authorization, X-Request-ID, X-Trace-Id"
 );
 
             if (!"/api/health".equals(path)) {

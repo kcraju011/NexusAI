@@ -57,34 +57,42 @@ public class PostgresIncidentRepository {
     public Optional<Incident> findById(String id)
             throws SQLException {
 
-        String sql = """
-            SELECT id, service_id, description, severity
-                FROM incidents
-                WHERE id = ?
-                """;
+        try (Tracing.Span span =
+                     Tracing.startSpan("postgres.incident.find_by_id")) {
+            try {
+                String sql = """
+                    SELECT id, service_id, description, severity
+                        FROM incidents
+                        WHERE id = ?
+                        """;
 
-        try (Connection connection = getConnection();
-             PreparedStatement statement =
-                     connection.prepareStatement(sql)) {
+                try (Connection connection = getConnection();
+                     PreparedStatement statement =
+                             connection.prepareStatement(sql)) {
 
-            statement.setString(1, id);
+                    statement.setString(1, id);
 
-            try (ResultSet result = statement.executeQuery()) {
-                if (!result.next()) {
-                    return Optional.empty();
+                    try (ResultSet result = statement.executeQuery()) {
+                        if (!result.next()) {
+                            return Optional.empty();
+                        }
+
+                        Incident incident = new Incident(
+                                result.getString("id"),
+                                new Service(
+                                        result.getString("service_id"),
+                                        result.getString("service_id")),
+                                result.getString("description"),
+                                Incident.Severity.valueOf(
+                                        result.getString("severity"))
+                        );
+
+                        return Optional.of(incident);
+                    }
                 }
-
-                Incident incident = new Incident(
-                        result.getString("id"),
-                    new Service(
-                        result.getString("service_id"),
-                        result.getString("service_id")),
-                        result.getString("description"),
-                        Incident.Severity.valueOf(
-                                result.getString("severity"))
-                );
-
-                return Optional.of(incident);
+            } catch (SQLException | RuntimeException exception) {
+                span.fail(exception);
+                throw exception;
             }
         }
     }
