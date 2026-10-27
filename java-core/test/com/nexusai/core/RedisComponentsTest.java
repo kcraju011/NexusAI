@@ -49,8 +49,10 @@ class RedisComponentsTest {
         requireRedis();
         String id = "TEST-" + java.util.UUID.randomUUID();
 
-        try (RedisIncidentCache cache =
-                     new RedisIncidentCache(redisUri())) {
+        try (Telemetry telemetry =
+                     new Telemetry("http://localhost:4317");
+             RedisIncidentCache cache =
+                     new RedisIncidentCache(redisUri(), telemetry)) {
 
             Incident incident = new Incident(
                     id,

@@ -27,9 +27,12 @@ public class PostgresIncidentRepositoryTest {
         String username = requiredEnv("NEXUS_DB_USER");
         String password = requiredEnv("NEXUS_DB_PASSWORD");
 
+        Telemetry telemetry = new Telemetry(System.getenv().getOrDefault(
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "http://localhost:4317"));
         PostgresIncidentRepository repository =
                 new PostgresIncidentRepository(
-                        url, username, password);
+                        url, username, password, telemetry);
 
         String id = "TEST-" + UUID.randomUUID();
 
@@ -85,6 +88,7 @@ public class PostgresIncidentRepositoryTest {
         } finally {
             // Ensure the test record is cleaned up after a failure.
             repository.deleteById(id);
+            telemetry.close();
         }
     }
 

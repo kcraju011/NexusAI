@@ -20,6 +20,10 @@ import com.nexusai.core.Incident.Severity;
 import com.sun.net.httpserver.Headers;
 import com.sun.net.httpserver.HttpExchange;
 import com.sun.net.httpserver.HttpServer;
+import io.opentelemetry.api.trace.SpanKind;
+import io.opentelemetry.api.trace.StatusCode;
+import io.opentelemetry.context.Context;
+import io.opentelemetry.context.propagation.TextMapGetter;
 
 public class NexusApiServer implements AutoCloseable {
     
@@ -41,29 +45,31 @@ public class NexusApiServer implements AutoCloseable {
     private final RedisIncidentCache incidentCache;
     private final RedisRateLimiter rateLimiter;
     private final MetricsRegistry metrics;
+    private final Telemetry telemetry;
 
     public NexusApiServer(
-       
-     int port,
+        int port,
         IncidentManager incidentManager,
         ServiceGraph serviceGraph, AuditLogger auditLogger,
         ConcurrentIncidentProcessor processor,
         PostgresIncidentRepository repository,
         AuthService authService,
-    RedisIncidentCache incidentCache,
-RedisRateLimiter rateLimiter,
-MetricsRegistry metrics)
+        RedisIncidentCache incidentCache,
+        RedisRateLimiter rateLimiter,
+        MetricsRegistry metrics,
+        Telemetry telemetry)
         throws IOException {
 
-    this.incidentManager = incidentManager;
-    this.serviceGraph = serviceGraph;
-    this.auditLogger = auditLogger;
-    this.processor = processor;
-    this.repository = repository;
-    this.authService = authService;
-    this.incidentCache = incidentCache;
-this.rateLimiter = rateLimiter;
-this.metrics = metrics;
+        this.incidentManager = incidentManager;
+        this.serviceGraph = serviceGraph;
+        this.auditLogger = auditLogger;
+        this.processor = processor;
+        this.repository = repository;
+        this.authService = authService;
+        this.incidentCache = incidentCache;
+        this.rateLimiter = rateLimiter;
+        this.metrics = metrics;
+        this.telemetry = telemetry;
         server = HttpServer.create(
                 new InetSocketAddress("0.0.0.0", port), 0);
 
@@ -73,7 +79,7 @@ this.metrics = metrics;
             long started = System.nanoTime();
 
             try {
-                handleTraced(exchange);
+                handleWithTelemetry(exchange);
             } finally {
                 int status = exchange.getResponseCode();
                 metrics.recordRequest(status, System.nanoTime() - started);
@@ -96,7 +102,9 @@ this.metrics = metrics;
         String traceId = Tracing.beginRequest(
                 exchange.getRequestHeaders().getFirst("X-Trace-Id")
         );
-        exchange.getResponseHeaders().set("X-Trace-Id", traceId);
+        if (exchange.getResponseHeaders().getFirst("X-Trace-Id") == null) {
+            exchange.getResponseHeaders().set("X-Trace-Id", traceId);
+        }
 
         try (Tracing.Span span = Tracing.startSpan("http.request")) {
             try {
@@ -107,6 +115,69 @@ this.metrics = metrics;
             }
         } finally {
             Tracing.endRequest();
+        }
+    }
+
+    private void handleWithTelemetry(HttpExchange exchange)
+            throws IOException {
+
+        var propagator = telemetry.openTelemetry()
+                .getPropagators()
+                .getTextMapPropagator();
+
+        var parentContext = propagator.extract(
+                Context.root(),
+                exchange.getRequestHeaders(),
+                new TextMapGetter<Headers>() {
+                    @Override
+                    public Iterable<String> keys(Headers headers) {
+                        return headers.keySet();
+                    }
+
+                    @Override
+                    public String get(Headers headers, String key) {
+                        return headers.getFirst(key);
+                    }
+                }
+        );
+
+        var span = telemetry.tracer()
+                .spanBuilder("HTTP " + exchange.getRequestMethod())
+                .setParent(parentContext)
+                .setSpanKind(SpanKind.SERVER)
+                .startSpan();
+
+        exchange.getResponseHeaders().set(
+                "X-Trace-Id",
+                span.getSpanContext().getTraceId()
+        );
+
+        try (var scope = span.makeCurrent()) {
+            span.setAttribute(
+                    "http.request.method",
+                    exchange.getRequestMethod()
+            );
+            span.setAttribute(
+                    "url.path",
+                    exchange.getRequestURI().getPath()
+            );
+
+            try {
+                handleTraced(exchange);
+            } catch (IOException | RuntimeException exception) {
+                Telemetry.recordError(span, exception);
+                throw exception;
+            } finally {
+                int status = exchange.getResponseCode();
+                if (status >= 0) {
+                    span.setAttribute("http.response.status_code", status);
+                    if (status >= 500) {
+                        span.setStatus(StatusCode.ERROR);
+                    }
+                }
+            }
+        } finally {
+            span.end();
         }
     }
 

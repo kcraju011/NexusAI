@@ -1,6 +1,8 @@
 
 package com.nexusai.core;
 
+import io.opentelemetry.api.trace.Span;
+
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -16,15 +18,18 @@ public class PostgresIncidentRepository {
     private final String url;
     private final String username;
     private final String password;
+    private final Telemetry telemetry;
 
     public PostgresIncidentRepository(
             String url,
             String username,
-            String password) {
+            String password,
+            Telemetry telemetry) {
 
         this.url = url;
         this.username = username;
         this.password = password;
+        this.telemetry = telemetry;
     }
 
     private Connection getConnection() throws SQLException {
@@ -36,64 +41,83 @@ public class PostgresIncidentRepository {
     
     public void save(Incident incident) throws SQLException {
 
-        String sql = """
-                INSERT INTO incidents (id, description, severity)
-                VALUES (?, ?, ?)
-                """;
+        Span span = telemetry.startSpan("postgres.incident.save");
+        try {
+            String sql = """
+                    INSERT INTO incidents (id, description, severity)
+                    VALUES (?, ?, ?)
+                    """;
 
-        try (Connection connection = getConnection();
-             PreparedStatement statement =
-                     connection.prepareStatement(sql)) {
+            try (Connection connection = getConnection();
+                 PreparedStatement statement =
+                         connection.prepareStatement(sql)) {
 
-            statement.setString(1, incident.getId());
-            statement.setString(2, incident.getDescription());
-            statement.setString(
-                    3, incident.getSeverity().name());
+                statement.setString(1, incident.getId());
+                statement.setString(2, incident.getDescription());
+                statement.setString(
+                        3, incident.getSeverity().name());
 
-            statement.executeUpdate();
+                statement.executeUpdate();
+            }
+        } catch (SQLException | RuntimeException exception) {
+            Telemetry.recordError(span, exception);
+            throw exception;
+        } finally {
+            span.end();
         }
     }
 
     public Optional<Incident> findById(String id)
             throws SQLException {
 
-        try (Tracing.Span span =
-                     Tracing.startSpan("postgres.incident.find_by_id")) {
+        Span telemetrySpan =
+                telemetry.startSpan("postgres.incident.find_by_id");
+        try {
             try {
-                String sql = """
-                    SELECT id, service_id, description, severity
-                        FROM incidents
-                        WHERE id = ?
-                        """;
+                try (Tracing.Span span =
+                     Tracing.startSpan("postgres.incident.find_by_id")) {
+                    try {
+                        String sql = """
+                            SELECT id, service_id, description, severity
+                                FROM incidents
+                                WHERE id = ?
+                                """;
 
-                try (Connection connection = getConnection();
-                     PreparedStatement statement =
-                             connection.prepareStatement(sql)) {
+                        try (Connection connection = getConnection();
+                             PreparedStatement statement =
+                                     connection.prepareStatement(sql)) {
 
-                    statement.setString(1, id);
+                            statement.setString(1, id);
 
-                    try (ResultSet result = statement.executeQuery()) {
-                        if (!result.next()) {
-                            return Optional.empty();
+                            try (ResultSet result = statement.executeQuery()) {
+                                if (!result.next()) {
+                                    return Optional.empty();
+                                }
+
+                                Incident incident = new Incident(
+                                        result.getString("id"),
+                                        new Service(
+                                                result.getString("service_id"),
+                                                result.getString("service_id")),
+                                        result.getString("description"),
+                                        Incident.Severity.valueOf(
+                                                result.getString("severity"))
+                                );
+
+                                return Optional.of(incident);
+                            }
                         }
-
-                        Incident incident = new Incident(
-                                result.getString("id"),
-                                new Service(
-                                        result.getString("service_id"),
-                                        result.getString("service_id")),
-                                result.getString("description"),
-                                Incident.Severity.valueOf(
-                                        result.getString("severity"))
-                        );
-
-                        return Optional.of(incident);
+                    } catch (SQLException | RuntimeException exception) {
+                        span.fail(exception);
+                        throw exception;
                     }
                 }
             } catch (SQLException | RuntimeException exception) {
-                span.fail(exception);
+                Telemetry.recordError(telemetrySpan, exception);
                 throw exception;
             }
+        } finally {
+            telemetrySpan.end();
         }
     }
 

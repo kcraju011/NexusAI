@@ -44,6 +44,7 @@ services:
       NEXUS_ADMIN_PASSWORD: ${NEXUS_ADMIN_PASSWORD:?Set admin password}
       NEXUS_VIEWER_USERNAME: ${NEXUS_VIEWER_USERNAME:?Set viewer username}
       NEXUS_VIEWER_PASSWORD: ${NEXUS_VIEWER_PASSWORD:?Set viewer password}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4317
     ports:
       - "127.0.0.1:8080:8080"
     volumes:
@@ -53,6 +54,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      jaeger:
+        condition: service_started
 
   dashboard:
     build:
@@ -78,6 +81,12 @@ services:
       - "127.0.0.1:9090:9090"
     depends_on:
       - api
+
+  jaeger:
+    image: jaegertracing/all-in-one:1.62.0
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:16686:16686"
 
 volumes:
   nexusai-postgres-data:

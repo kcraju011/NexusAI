@@ -48,11 +48,16 @@ public class NexusApiServerTest {
 
     public static void main(String[] args) throws Exception {
 
+        String otlpEndpoint = System.getenv().getOrDefault(
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "http://localhost:4317");
+        Telemetry telemetry = new Telemetry(otlpEndpoint);
         PostgresIncidentRepository repository =
                 new PostgresIncidentRepository(
                         requiredEnv("NEXUS_DB_URL"),
                         requiredEnv("NEXUS_DB_USER"),
-                        requiredEnv("NEXUS_DB_PASSWORD"));
+                        requiredEnv("NEXUS_DB_PASSWORD"),
+                        telemetry);
         AuthService authService = new AuthService(
                 "test-admin", "test-admin-password",
                 "test-viewer", "test-viewer-password");
@@ -77,11 +82,12 @@ public class NexusApiServerTest {
             redisUri = "redis://localhost:6379";
         }
 
-        try (ConcurrentIncidentProcessor processor =
+        try (telemetry;
+             ConcurrentIncidentProcessor processor =
                      new ConcurrentIncidentProcessor(
                              1, 10, incident -> { });
              RedisIncidentCache incidentCache =
-                     new RedisIncidentCache(redisUri);
+                     new RedisIncidentCache(redisUri, telemetry);
              RedisRateLimiter rateLimiter =
                      new RedisRateLimiter(redisUri, 60, 60);
              NexusApiServer server =
@@ -92,7 +98,8 @@ public class NexusApiServerTest {
                              processor,
                              repository, authService,
                              incidentCache, rateLimiter,
-                             new MetricsRegistry())) {
+                             new MetricsRegistry(),
+                             telemetry)) {
 
             server.start();
 
@@ -107,6 +114,27 @@ public class NexusApiServerTest {
 
             check(health.statusCode() == 200,
                     "Health should return 200");
+
+            String parentTraceId = "4bf92f3577b34da6a3ce929d0e0e4736";
+            HttpRequest tracedHealthRequest = HttpRequest.newBuilder()
+                    .uri(URI.create(baseUrl + "/api/health"))
+                    .header(
+                            "traceparent",
+                            "00-" + parentTraceId
+                                    + "-00f067aa0ba902b7-01")
+                    .GET()
+                    .build();
+            HttpResponse<String> tracedHealth = client.send(
+                    tracedHealthRequest,
+                    HttpResponse.BodyHandlers.ofString());
+
+            check(tracedHealth.statusCode() == 200,
+                    "Traced health should return 200");
+            check(parentTraceId.equals(
+                            tracedHealth.headers()
+                                    .firstValue("X-Trace-Id")
+                                    .orElse(null)),
+                    "Response should expose the propagated trace ID");
 
             HttpResponse<String> unauthenticated = request(
                     client, baseUrl, "GET",

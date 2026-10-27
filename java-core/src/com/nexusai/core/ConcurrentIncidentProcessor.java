@@ -1,5 +1,7 @@
 package com.nexusai.core;
 
+import io.opentelemetry.context.Context;
+
 import java.util.Objects;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -45,11 +47,12 @@ public class ConcurrentIncidentProcessor
                 incident, "Incident cannot be null");
 
         String traceId = Tracing.currentTraceId();
+        Context otelContext = Context.current();
 
         executor.execute(() -> {
             String previousTraceId = Tracing.currentTraceId();
 
-            try {
+            try (var scope = otelContext.makeCurrent()) {
                 Tracing.endRequest();
 
                 if ("no-active-trace".equals(traceId)) {

@@ -16,6 +16,10 @@ public class ApiMain {
         String url = requiredEnv("NEXUS_DB_URL");
         String username = requiredEnv("NEXUS_DB_USER");
         String password = requiredEnv("NEXUS_DB_PASSWORD");
+        String otlpEndpoint = System.getenv().getOrDefault(
+                "OTEL_EXPORTER_OTLP_ENDPOINT",
+                "http://localhost:4317");
+        Telemetry telemetry = new Telemetry(otlpEndpoint);
 
         IncidentManager manager = new IncidentManager();
         AuditLogger auditLogger =
@@ -34,7 +38,7 @@ public class ApiMain {
 
         PostgresIncidentRepository repository =
                 new PostgresIncidentRepository(
-                        url, username, password);
+                        url, username, password, telemetry);
 
         MetricsRegistry metrics = new MetricsRegistry();
         Map<String, String> activeAlertIncidents = new HashMap<>();
@@ -123,7 +127,7 @@ public class ApiMain {
         String redisUri = requiredEnv("REDIS_URI");
 
 RedisIncidentCache incidentCache =
-        new RedisIncidentCache(redisUri);
+        new RedisIncidentCache(redisUri, telemetry);
 
 RedisRateLimiter rateLimiter =
         new RedisRateLimiter(redisUri, 60, 60);
@@ -145,13 +149,15 @@ RedisRateLimiter rateLimiter =
                     authService,
                     incidentCache,
                     rateLimiter,
-                    metrics
+                    metrics,
+                    telemetry
                 );
 
             server.start();
 
         } catch (Exception exception) {
             processor.close();
+            telemetry.close();
             throw new IOException(
                     "Failed to start NexusAI API", exception);
         }
@@ -195,6 +201,7 @@ RedisRateLimiter rateLimiter =
             processor.close();
             rateLimiter.close();
             incidentCache.close();
+            telemetry.close();
         }));
 
         System.out.println(
