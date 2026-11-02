@@ -318,6 +318,68 @@ textarea::placeholder {
   white-space: nowrap;
 }
 
+.button-small + .button-small {
+  margin-left: 8px;
+}
+
+.correlation-panel {
+  padding: 24px;
+  border-top: 1px solid #202b40;
+}
+
+.correlation-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 14px;
+}
+
+.correlation-form label {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  color: #b8c4d8;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.correlation-form label:last-of-type {
+  grid-column: 1 / -1;
+}
+
+.correlation-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  grid-column: 1 / -1;
+}
+
+.correlation-result {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 20px 0 0;
+  padding-top: 18px;
+  border-top: 1px solid #202b40;
+}
+
+.correlation-result div {
+  min-width: 0;
+}
+
+.correlation-result dt {
+  margin-bottom: 5px;
+  color: #8491a9;
+  font-size: 11px;
+  text-transform: uppercase;
+}
+
+.correlation-result dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: #d7e1f5;
+  font-size: 13px;
+}
+
 .dependency-form {
   gap: 14px;
 }
@@ -516,6 +578,15 @@ tbody tr:hover {
   }
 
   .panel {
+    padding: 17px;
+  }
+
+  .correlation-form,
+  .correlation-result {
+    grid-template-columns: 1fr;
+  }
+
+  .correlation-panel {
     padding: 17px;
   }
 

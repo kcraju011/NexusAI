@@ -42,6 +42,7 @@ public class NexusApiServer implements AutoCloseable {
     private final ServiceGraph serviceGraph;
     private final ConcurrentIncidentProcessor processor;
     private final AuthService authService;
+    private final IncidentCorrelationService correlationService;
     private final RedisIncidentCache incidentCache;
     private final RedisRateLimiter rateLimiter;
     private final MetricsRegistry metrics;
@@ -54,6 +55,7 @@ public class NexusApiServer implements AutoCloseable {
         ConcurrentIncidentProcessor processor,
         PostgresIncidentRepository repository,
         AuthService authService,
+        IncidentCorrelationService correlationService,
         RedisIncidentCache incidentCache,
         RedisRateLimiter rateLimiter,
         MetricsRegistry metrics,
@@ -66,6 +68,7 @@ public class NexusApiServer implements AutoCloseable {
         this.processor = processor;
         this.repository = repository;
         this.authService = authService;
+        this.correlationService = correlationService;
         this.incidentCache = incidentCache;
         this.rateLimiter = rateLimiter;
         this.metrics = metrics;
@@ -381,6 +384,23 @@ public class NexusApiServer implements AutoCloseable {
             return;
         }
 
+        if (("POST".equals(method) || "GET".equals(method))
+                && path.startsWith("/api/incidents/")
+                && path.endsWith("/correlation")) {
+            String id = path.substring(
+                    "/api/incidents/".length(),
+                    path.length() - "/correlation".length());
+
+            if (!id.isBlank() && !id.contains("/")) {
+                if ("POST".equals(method)) {
+                    linkIncidentCorrelation(exchange, id, user);
+                } else {
+                    getIncidentCorrelation(exchange, id);
+                }
+                return;
+            }
+        }
+
         if ("POST".equals(method)
                 && "/api/incidents".equals(path)) {
             createIncident(exchange, user);
@@ -508,8 +528,78 @@ public class NexusApiServer implements AutoCloseable {
     sendJson(exchange, 201, incidentJson(incident));
 }
 
+    private void linkIncidentCorrelation(
+        HttpExchange exchange,
+        String id,
+        AuthService.AuthenticatedUser user
+    ) throws IOException, SQLException {
+    Map<String, String> fields = parseJson(readBody(exchange));
+    String traceId = required(fields, "traceId");
+    String serviceName = required(fields, "serviceName");
+    String operationName = required(fields, "operationName");
+    String errorType = required(fields, "errorType");
+    String message = required(fields, "message");
+
+    if (repository.findById(id).isEmpty()) {
+        sendJson(exchange, 404, error("Incident not found"));
+        return;
+    }
+
+    IncidentCorrelationService.Correlation correlation;
+    try {
+        correlation = correlationService.link(
+                id, traceId, serviceName, operationName,
+                errorType, message);
+    } catch (IllegalArgumentException exception) {
+        throw new ApiException(
+                400,
+                "INVALID_REQUEST",
+                exception.getMessage());
+    }
+
+    auditLogger.record(
+            user.username(),
+            "INCIDENT_CORRELATION_LINK",
+            id,
+            "SUCCESS");
+
+    sendJson(exchange, 201, correlationJson(correlation));
+    }
+
+    private void getIncidentCorrelation(
+        HttpExchange exchange,
+        String id
+    ) throws IOException, SQLException {
+    if (repository.findById(id).isEmpty()) {
+        sendJson(exchange, 404, error("Incident not found"));
+        return;
+    }
+
+    Optional<IncidentCorrelationService.Correlation> correlation =
+            correlationService.findByIncidentId(id);
+    if (correlation.isEmpty()) {
+        sendJson(exchange, 404, error("Correlation not found"));
+        return;
+    }
+
+    sendJson(exchange, 200, correlationJson(correlation.get()));
+    }
+
+    private String correlationJson(
+        IncidentCorrelationService.Correlation correlation) {
+    return "{"
+            + "\"incidentId\":" + quote(correlation.incidentId()) + ","
+            + "\"traceId\":" + quote(correlation.traceId()) + ","
+            + "\"serviceName\":" + quote(correlation.serviceName()) + ","
+            + "\"operationName\":"
+            + quote(correlation.operationName()) + ","
+            + "\"errorType\":" + quote(correlation.errorType()) + ","
+            + "\"message\":" + quote(correlation.message())
+            + "}";
+    }
+
     private void listIncidents(HttpExchange exchange)
-            throws IOException, SQLException {
+        throws IOException, SQLException {
 
         List<Incident> incidents = repository.findAll();
         List<String> values = new ArrayList<>();

@@ -97,6 +97,7 @@ public class NexusApiServerTest {
                                      "target", "test-audit.jsonl")),
                              processor,
                              repository, authService,
+                             new IncidentCorrelationService(),
                              incidentCache, rateLimiter,
                              new MetricsRegistry(),
                              telemetry)) {
@@ -172,6 +173,39 @@ public class NexusApiServerTest {
 
             check(created.body().contains("\"serviceId\":\"S001\""),
                     "Response should contain service ID");
+
+            String correlationPath =
+                    "/api/incidents/" + incidentId + "/correlation";
+            HttpResponse<String> missingCorrelation = request(
+                    client, baseUrl, "GET",
+                    correlationPath, null, adminToken);
+            check(missingCorrelation.statusCode() == 404,
+                    "Missing correlation should return 404");
+
+            String correlationBody =
+                    "{\"traceId\":\"0123456789abcdef0123456789abcdef\","
+                    + "\"serviceName\":\"nexusai-api\","
+                    + "\"operationName\":\"postgres.incident.find_by_id\","
+                    + "\"errorType\":\"SQLException\","
+                    + "\"message\":\"Database connection timeout\"}";
+            HttpResponse<String> linkedCorrelation = request(
+                    client, baseUrl, "POST",
+                    correlationPath, correlationBody, adminToken);
+            check(linkedCorrelation.statusCode() == 201,
+                    "Correlation link should return 201");
+            check(linkedCorrelation.body().contains(
+                            "\"incidentId\":\"" + incidentId + "\"")
+                            && linkedCorrelation.body().contains(
+                                    "\"traceId\":\"0123456789abcdef0123456789abcdef\""),
+                    "Correlation response should include incident and trace IDs");
+
+            HttpResponse<String> fetchedCorrelation = request(
+                    client, baseUrl, "GET",
+                    correlationPath, null, adminToken);
+            check(fetchedCorrelation.statusCode() == 200
+                            && fetchedCorrelation.body().contains(
+                                    "\"operationName\":\"postgres.incident.find_by_id\""),
+                    "Correlation retrieval should return linked trace information");
 
             HttpResponse<String> fetched = request(
                     client, baseUrl, "GET",
@@ -265,6 +299,12 @@ public class NexusApiServerTest {
 
             check(viewerWrite.statusCode() == 403,
                     "Viewer writes should be forbidden");
+
+            HttpResponse<String> viewerCorrelationWrite = request(
+                    client, baseUrl, "POST",
+                    correlationPath, correlationBody, viewerToken);
+            check(viewerCorrelationWrite.statusCode() == 403,
+                    "Viewer correlation writes should be forbidden");
 
             HttpResponse<String> logout = request(
                     client, baseUrl, "POST",

@@ -22,6 +22,8 @@ public class ApiMain {
         Telemetry telemetry = new Telemetry(otlpEndpoint);
 
         IncidentManager manager = new IncidentManager();
+        IncidentCorrelationService correlationService =
+                new IncidentCorrelationService();
         AuditLogger auditLogger =
         new AuditLogger(java.nio.file.Path.of("logs", "audit.jsonl"));
 
@@ -147,6 +149,7 @@ RedisRateLimiter rateLimiter =
                     processor,
                     repository,
                     authService,
+                    correlationService,
                     incidentCache,
                     rateLimiter,
                     metrics,

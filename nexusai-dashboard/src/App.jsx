@@ -69,6 +69,16 @@ export default function App() {
   const [incidentServiceId, setIncidentServiceId] = useState("S001");
   const [serviceId, setServiceId] = useState("S001");
   const [downstream, setDownstream] = useState([]);
+  const [correlationIncidentId, setCorrelationIncidentId] = useState("");
+  const [correlationForm, setCorrelationForm] = useState({
+    traceId: "",
+    serviceName: "",
+    operationName: "",
+    errorType: "",
+    message: "",
+  });
+  const [correlationResult, setCorrelationResult] = useState(null);
+  const [correlationBusy, setCorrelationBusy] = useState(false);
 
   const [authenticated, setAuthenticated] = useState(false);
 const [loginForm, setLoginForm] = useState({
@@ -113,6 +123,15 @@ async function handleLogout() {
     setAuthenticated(false);
     setIncidents([]);
     setDownstream([]);
+    setCorrelationIncidentId("");
+    setCorrelationResult(null);
+    setCorrelationForm({
+      traceId: "",
+      serviceName: "",
+      operationName: "",
+      errorType: "",
+      message: "",
+    });
     setMessage("You have been logged out.");
     setError("");
   }
@@ -246,6 +265,70 @@ async function handleLogout() {
       setMessage(`Loaded dependencies for ${serviceId}.`);
     } catch (err) {
       setError(err.message);
+    }
+  }
+
+  function openCorrelationForm(incidentId) {
+    setCorrelationIncidentId(incidentId);
+    setCorrelationResult(null);
+    setCorrelationForm({
+      traceId: "",
+      serviceName: "",
+      operationName: "",
+      errorType: "",
+      message: "",
+    });
+    setError("");
+    setMessage("");
+  }
+
+  async function linkCorrelation(event) {
+    event.preventDefault();
+    setError("");
+    setMessage("");
+    setCorrelationBusy(true);
+
+    try {
+      const result = await apiRequest(
+        `/incidents/${encodeURIComponent(correlationIncidentId)}/correlation`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            traceId: correlationForm.traceId.trim(),
+            serviceName: correlationForm.serviceName.trim(),
+            operationName: correlationForm.operationName.trim(),
+            errorType: correlationForm.errorType.trim(),
+            message: correlationForm.message.trim(),
+          }),
+        }
+      );
+
+      setCorrelationResult(result);
+      setMessage(`Trace correlation linked to ${correlationIncidentId}.`);
+    } catch (err) {
+      setError(err.message || "Unable to link trace correlation.");
+    } finally {
+      setCorrelationBusy(false);
+    }
+  }
+
+  async function retrieveCorrelation() {
+    setError("");
+    setMessage("");
+    setCorrelationResult(null);
+    setCorrelationBusy(true);
+
+    try {
+      const result = await apiRequest(
+        `/incidents/${encodeURIComponent(correlationIncidentId)}/correlation`
+      );
+
+      setCorrelationResult(result);
+      setMessage(`Trace correlation loaded for ${correlationIncidentId}.`);
+    } catch (err) {
+      setError(err.message || "Unable to retrieve trace correlation.");
+    } finally {
+      setCorrelationBusy(false);
     }
   }
 
@@ -556,11 +639,170 @@ async function handleLogout() {
                       >
                         Analyze
                       </button>
+                      <button
+                        className="button button-small button-secondary"
+                        onClick={() => openCorrelationForm(incident.id)}
+                      >
+                        Correlation
+                      </button>
                     </td>
                   </tr>
                 ))}
               </tbody>
             </table>
+          </div>
+        )}
+
+        {correlationIncidentId && (
+          <div className="correlation-panel">
+            <div className="panel-heading">
+              <div>
+                <h2>Incident correlation</h2>
+                <p>
+                  Link or retrieve trace details for{" "}
+                  <strong>{correlationIncidentId}</strong>.
+                </p>
+              </div>
+              <button
+                className="button button-secondary"
+                type="button"
+                onClick={() => {
+                  setCorrelationIncidentId("");
+                  setCorrelationResult(null);
+                  setCorrelationForm({
+                    traceId: "",
+                    serviceName: "",
+                    operationName: "",
+                    errorType: "",
+                    message: "",
+                  });
+                }}
+              >
+                Close
+              </button>
+            </div>
+
+            <form className="correlation-form" onSubmit={linkCorrelation}>
+              <label>
+                Trace ID
+                <input
+                  value={correlationForm.traceId}
+                  onChange={(event) =>
+                    setCorrelationForm({
+                      ...correlationForm,
+                      traceId: event.target.value,
+                    })
+                  }
+                  placeholder="32-character hexadecimal trace ID"
+                  pattern="[a-fA-F0-9]{32}"
+                  title="Enter a 32-character hexadecimal trace ID"
+                  required
+                />
+              </label>
+
+              <label>
+                Service name
+                <input
+                  value={correlationForm.serviceName}
+                  onChange={(event) =>
+                    setCorrelationForm({
+                      ...correlationForm,
+                      serviceName: event.target.value,
+                    })
+                  }
+                  required
+                />
+              </label>
+
+              <label>
+                Operation name
+                <input
+                  value={correlationForm.operationName}
+                  onChange={(event) =>
+                    setCorrelationForm({
+                      ...correlationForm,
+                      operationName: event.target.value,
+                    })
+                  }
+                  required
+                />
+              </label>
+
+              <label>
+                Error type
+                <input
+                  value={correlationForm.errorType}
+                  onChange={(event) =>
+                    setCorrelationForm({
+                      ...correlationForm,
+                      errorType: event.target.value,
+                    })
+                  }
+                  required
+                />
+              </label>
+
+              <label>
+                Message
+                <textarea
+                  value={correlationForm.message}
+                  onChange={(event) =>
+                    setCorrelationForm({
+                      ...correlationForm,
+                      message: event.target.value,
+                    })
+                  }
+                  rows={2}
+                  required
+                />
+              </label>
+
+              <div className="correlation-actions">
+                <button
+                  className="button button-primary"
+                  disabled={correlationBusy}
+                >
+                  {correlationBusy ? "Linking..." : "Link trace"}
+                </button>
+                <button
+                  className="button button-secondary"
+                  type="button"
+                  onClick={retrieveCorrelation}
+                  disabled={correlationBusy}
+                >
+                  {correlationBusy ? "Loading..." : "Retrieve correlation"}
+                </button>
+              </div>
+            </form>
+
+            {correlationResult && (
+              <dl className="correlation-result" aria-live="polite">
+                <div>
+                  <dt>Incident</dt>
+                  <dd>{correlationResult.incidentId}</dd>
+                </div>
+                <div>
+                  <dt>Trace ID</dt>
+                  <dd>{correlationResult.traceId}</dd>
+                </div>
+                <div>
+                  <dt>Service</dt>
+                  <dd>{correlationResult.serviceName}</dd>
+                </div>
+                <div>
+                  <dt>Operation</dt>
+                  <dd>{correlationResult.operationName}</dd>
+                </div>
+                <div>
+                  <dt>Error type</dt>
+                  <dd>{correlationResult.errorType}</dd>
+                </div>
+                <div>
+                  <dt>Message</dt>
+                  <dd>{correlationResult.message}</dd>
+                </div>
+              </dl>
+            )}
           </div>
         )}
       </section>

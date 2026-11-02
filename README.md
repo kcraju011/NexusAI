@@ -37,3 +37,14 @@ $env:REDIS_URI = "redis://localhost:6379"
 
 When running with Docker Compose, the API uses the Redis service name:
 `redis://redis:6379`.
+
+## Dashboard incident and trace workflow
+
+Open the dashboard at `http://localhost:5173` and sign in with the
+`NEXUS_ADMIN_USERNAME` and `NEXUS_ADMIN_PASSWORD` values from `.env`. Create an
+incident from the dashboard, then select **Correlation** in its row to link a
+32-character hexadecimal trace ID and its service, operation, error type, and
+message. Use **Retrieve correlation** to load the linked details again.
+
+Correlation links are currently held in API memory and are cleared when the API
+restarts.
