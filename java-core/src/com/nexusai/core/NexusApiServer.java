@@ -5,6 +5,7 @@ import java.io.InputStream;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.sql.SQLException;
+import java.time.Instant;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
@@ -15,6 +16,7 @@ import java.util.concurrent.Executors;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+
 
 import com.nexusai.core.Incident.Severity;
 import com.sun.net.httpserver.Headers;
@@ -43,6 +45,8 @@ public class NexusApiServer implements AutoCloseable {
     private final ConcurrentIncidentProcessor processor;
     private final AuthService authService;
     private final IncidentCorrelationService correlationService;
+    private final IncidentDeduplicationService deduplicationService;
+    private final Map<String, String> failureIncidentIds = new HashMap<>();
     private final RedisIncidentCache incidentCache;
     private final RedisRateLimiter rateLimiter;
     private final MetricsRegistry metrics;
@@ -56,6 +60,7 @@ public class NexusApiServer implements AutoCloseable {
         PostgresIncidentRepository repository,
         AuthService authService,
         IncidentCorrelationService correlationService,
+        IncidentDeduplicationService deduplicationService,
         RedisIncidentCache incidentCache,
         RedisRateLimiter rateLimiter,
         MetricsRegistry metrics,
@@ -69,6 +74,7 @@ public class NexusApiServer implements AutoCloseable {
         this.repository = repository;
         this.authService = authService;
         this.correlationService = correlationService;
+        this.deduplicationService = deduplicationService;
         this.incidentCache = incidentCache;
         this.rateLimiter = rateLimiter;
         this.metrics = metrics;
@@ -230,6 +236,15 @@ public class NexusApiServer implements AutoCloseable {
                 try {
                     allowed = rateLimiter.allow(clientIp);
                 } catch (RuntimeException redisFailure) {
+                    recordRequestFailure(
+                            new IncidentDeduplicationService.Failure(
+                                    "nexusai-api",
+                                    "redis.rate_limiter.allow",
+                                    redisFailure.getClass().getSimpleName(),
+                                    "RATE_LIMITER_UNAVAILABLE"),
+                            Incident.Severity.HIGH,
+                            redisFailure
+                    );
                     sendJson(exchange, 503,
                             "{\"error\":\"Rate limiting temporarily unavailable\"}");
                     return;
@@ -329,6 +344,15 @@ public class NexusApiServer implements AutoCloseable {
                     "Unexpected API error",
                     exception
             );
+            recordRequestFailure(
+                    new IncidentDeduplicationService.Failure(
+                            "nexusai-api",
+                            "http.request",
+                            exception.getClass().getSimpleName(),
+                            "UNEXPECTED_API_ERROR"),
+                    Incident.Severity.HIGH,
+                    exception
+            );
 
             if (exchange.getResponseCode() == -1) {
                 ApiErrors.send(
@@ -350,6 +374,130 @@ public class NexusApiServer implements AutoCloseable {
             RequestContext.clear();
         }
 
+    }
+
+    public synchronized IncidentDeduplicationService.Detection recordFailure(
+            IncidentDeduplicationService.Failure failure,
+            Severity severity,
+            String description) throws SQLException {
+        IncidentDeduplicationService.Detection detection =
+                deduplicationService.detect(failure);
+        Incident incident = incidentManager.findIncidentById(
+                detection.incidentId());
+
+        if (detection.newIncident()) {
+            incident = new Incident(
+                    detection.incidentId(),
+                    new Service("S001", failure.serviceName()),
+                    description,
+                    severity,
+                    detection.fingerprint(),
+                    detection.occurrenceCount(),
+                    detection.firstSeen(),
+                    detection.lastSeen(),
+                    null
+            );
+            repository.save(incident);
+            incidentManager.reportIncident(incident);
+        } else if (repository.updateOccurrence(
+                detection.incidentId(),
+                detection.occurrenceCount(),
+                detection.lastSeen())) {
+            if (incident != null) {
+                incident.recordOccurrence(
+                        detection.occurrenceCount(),
+                        detection.lastSeen());
+            }
+        } else {
+            boolean incidentWasNotInManager = incident == null;
+            if (incidentWasNotInManager) {
+                incident = new Incident(
+                        detection.incidentId(),
+                        new Service("S001", failure.serviceName()),
+                        description,
+                        severity,
+                        detection.fingerprint(),
+                        detection.occurrenceCount(),
+                        detection.firstSeen(),
+                        detection.lastSeen(),
+                        null
+                );
+            } else {
+                incident.recordOccurrence(
+                        detection.occurrenceCount(),
+                        detection.lastSeen());
+            }
+            repository.save(incident);
+            if (incidentWasNotInManager) {
+                incidentManager.reportIncident(incident);
+            }
+        }
+
+        failureIncidentIds.put(
+                detection.fingerprint(), detection.incidentId());
+        invalidateIncidentCache(detection.incidentId());
+        return detection;
+    }
+
+    public synchronized boolean resolveFailure(
+            IncidentDeduplicationService.Failure failure)
+            throws SQLException {
+        String fingerprint =
+                deduplicationService.createFingerprint(failure);
+        String incidentId = failureIncidentIds.get(fingerprint);
+        if (incidentId == null) {
+            return false;
+        }
+
+        Instant resolvedAt = Instant.now();
+        if (!repository.markResolved(incidentId, resolvedAt)) {
+            return false;
+        }
+
+        boolean resolved = deduplicationService.resolve(fingerprint);
+        if (!resolved) {
+            return false;
+        }
+
+        Incident incident = incidentManager.findIncidentById(incidentId);
+        if (incident != null) {
+            incident.resolve(resolvedAt);
+        }
+        failureIncidentIds.remove(fingerprint);
+        invalidateIncidentCache(incidentId);
+        return true;
+    }
+
+    private void recordRequestFailure(
+            IncidentDeduplicationService.Failure failure,
+            Severity severity,
+            Throwable cause) {
+        try {
+            recordFailure(
+                    failure,
+                    severity,
+                    failure.errorCode() + " in " + failure.operationName()
+                            + " (" + failure.errorType() + ")");
+        } catch (SQLException | RuntimeException recordingFailure) {
+            if (cause != recordingFailure) {
+                cause.addSuppressed(recordingFailure);
+            }
+            AppLogger.error(
+                    "failure_incident_persist_failed",
+                    "Unable to record detected failure as an incident",
+                    recordingFailure);
+        }
+    }
+
+    private void invalidateIncidentCache(String incidentId) {
+        try {
+            incidentCache.invalidate(incidentId);
+        } catch (RuntimeException cacheFailure) {
+            AppLogger.error(
+                    "incident_cache_invalidation_failed",
+                    "Incident cache invalidation failed",
+                    cacheFailure);
+        }
     }
 
         private void route(
@@ -800,7 +948,17 @@ public class NexusApiServer implements AutoCloseable {
                 + "\"description\":"
                 + quote(incident.getDescription()) + ","
                 + "\"severity\":"
-                + quote(incident.getSeverity().name())
+                + quote(incident.getSeverity().name()) + ","
+                + "\"occurrenceCount\":"
+                + incident.getOccurrenceCount() + ","
+                + "\"firstSeen\":"
+                + quote(incident.getFirstSeen().toString()) + ","
+                + "\"lastSeen\":"
+                + quote(incident.getLastSeen().toString()) + ","
+                + "\"resolvedAt\":"
+                + (incident.getResolvedAt() == null
+                        ? "null"
+                        : quote(incident.getResolvedAt().toString()))
                 + "}";
     }
 

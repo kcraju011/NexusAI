@@ -21,6 +21,14 @@ $response = Invoke-WebRequest -Uri "http://localhost:8080/api/health"
 $response.Headers["X-Trace-Id"]
 ```
 
+The incident schema is initialized automatically for a new PostgreSQL volume.
+For an existing volume, apply the additive incident metadata columns after
+upgrading the API:
+
+```powershell
+docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/01-schema.sql'
+```
+
 If `Invoke-WebRequest` reports that it cannot connect, the API is not listening
 on port `8080`; check that Docker Desktop is running and inspect service startup
 logs with `docker compose logs api`.

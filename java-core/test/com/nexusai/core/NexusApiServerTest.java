@@ -98,6 +98,7 @@ public class NexusApiServerTest {
                              processor,
                              repository, authService,
                              new IncidentCorrelationService(),
+                             new IncidentDeduplicationService(),
                              incidentCache, rateLimiter,
                              new MetricsRegistry(),
                              telemetry)) {

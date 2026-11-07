@@ -8,6 +8,8 @@ import io.lettuce.core.api.StatefulRedisConnection;
 import io.lettuce.core.api.sync.RedisCommands;
 
 import java.time.Duration;
+import java.time.Instant;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
 
@@ -47,6 +49,7 @@ public final class RedisIncidentCache implements AutoCloseable {
                             String description = fields.get("description");
                             String serviceId = fields.get("serviceId");
                             String severity = fields.get("severity");
+                            Instant legacySeenAt = Instant.now();
 
                             if (description == null || serviceId == null
                                     || severity == null) {
@@ -58,11 +61,21 @@ public final class RedisIncidentCache implements AutoCloseable {
                             // Refresh the TTL after a successful cache lookup.
                             redis.expire(key(id), TTL);
 
+                            String resolvedAt = fields.get("resolvedAt");
                             return Optional.of(new Incident(
                                     id,
                                     new Service(serviceId, serviceId),
                                     description,
-                                    Incident.Severity.valueOf(severity)
+                                    Incident.Severity.valueOf(severity),
+                                    fields.get("fingerprint"),
+                                    Long.parseLong(fields.getOrDefault(
+                                            "occurrenceCount", "1")),
+                                    Instant.parse(fields.getOrDefault(
+                                            "firstSeen", legacySeenAt.toString())),
+                                    Instant.parse(fields.getOrDefault(
+                                            "lastSeen", legacySeenAt.toString())),
+                                    resolvedAt == null
+                                            ? null : Instant.parse(resolvedAt)
                             ));
                         } catch (IllegalArgumentException ex) {
                             // Malformed cached data should not break incident retrieval.
@@ -87,11 +100,21 @@ public final class RedisIncidentCache implements AutoCloseable {
     public void put(Incident incident) {
         String key = key(incident.getId());
 
-        redis.hset(key, Map.of(
-                "serviceId", incident.getService().getId(),
-                "description", incident.getDescription(),
-                "severity", incident.getSeverity().name()
-        ));
+        Map<String, String> fields = new HashMap<>();
+        fields.put("serviceId", incident.getService().getId());
+        fields.put("description", incident.getDescription());
+        fields.put("severity", incident.getSeverity().name());
+        fields.put("occurrenceCount",
+                Long.toString(incident.getOccurrenceCount()));
+        fields.put("firstSeen", incident.getFirstSeen().toString());
+        fields.put("lastSeen", incident.getLastSeen().toString());
+        if (incident.getFingerprint() != null) {
+            fields.put("fingerprint", incident.getFingerprint());
+        }
+        if (incident.getResolvedAt() != null) {
+            fields.put("resolvedAt", incident.getResolvedAt().toString());
+        }
+        redis.hset(key, fields);
 
         redis.expire(key, TTL);
     }

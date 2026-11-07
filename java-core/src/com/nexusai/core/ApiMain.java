@@ -2,9 +2,6 @@ package com.nexusai.core;
 
 import java.io.IOException;
 import java.sql.SQLException;
-import java.util.HashMap;
-import java.util.Map;
-import java.util.UUID;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
@@ -24,6 +21,8 @@ public class ApiMain {
         IncidentManager manager = new IncidentManager();
         IncidentCorrelationService correlationService =
                 new IncidentCorrelationService();
+        IncidentDeduplicationService deduplicationService =
+                new IncidentDeduplicationService();
         AuditLogger auditLogger =
         new AuditLogger(java.nio.file.Path.of("logs", "audit.jsonl"));
 
@@ -43,60 +42,6 @@ public class ApiMain {
                         url, username, password, telemetry);
 
         MetricsRegistry metrics = new MetricsRegistry();
-        Map<String, String> activeAlertIncidents = new HashMap<>();
-        ReliabilityMonitor monitor = new ReliabilityMonitor(
-                metrics,
-                event -> {
-                    System.out.printf(
-                            "[ALERT] rule=%s state=%s severity=%s message=%s%n",
-                            event.ruleId(),
-                            event.state(),
-                            event.severity(),
-                            event.message()
-                    );
-
-                    if (event.state() == ReliabilityMonitor.State.FIRING) {
-                        if (activeAlertIncidents.containsKey(event.ruleId())) {
-                            return;
-                        }
-
-                        String incidentId = "alert-" + UUID.randomUUID();
-                        Incident incident = new Incident(
-                                incidentId,
-                                new Service("S001", "S001"),
-                                "[" + event.ruleId() + "] " + event.message(),
-                                event.severity()
-                        );
-
-                        try {
-                            repository.save(incident);
-                        } catch (SQLException exception) {
-                            throw new IllegalStateException(
-                                    "Failed to persist alert incident "
-                                            + incidentId,
-                                    exception
-                            );
-                        }
-
-                        manager.reportIncident(incident);
-                        activeAlertIncidents.put(
-                                event.ruleId(), incidentId);
-                    } else {
-                        String incidentId =
-                                activeAlertIncidents.remove(event.ruleId());
-                        System.out.printf(
-                                "[ALERT] recovery observed rule=%s incident=%s; "
-                                        + "incident status is unchanged because "
-                                        + "the incident model has no resolution lifecycle%n",
-                                event.ruleId(),
-                                incidentId == null ? "none" : incidentId
-                        );
-                    }
-                },
-                20,
-                0.05,
-                0.20
-        );
 
         String adminUsername =
                 System.getenv("NEXUS_ADMIN_USERNAME");
@@ -150,6 +95,7 @@ RedisRateLimiter rateLimiter =
                     repository,
                     authService,
                     correlationService,
+                    deduplicationService,
                     incidentCache,
                     rateLimiter,
                     metrics,
@@ -164,6 +110,50 @@ RedisRateLimiter rateLimiter =
             throw new IOException(
                     "Failed to start NexusAI API", exception);
         }
+
+        ReliabilityMonitor monitor = new ReliabilityMonitor(
+                metrics,
+                event -> {
+                    System.out.printf(
+                            "[ALERT] rule=%s state=%s severity=%s message=%s%n",
+                            event.ruleId(),
+                            event.state(),
+                            event.severity(),
+                            event.message()
+                    );
+
+                    IncidentDeduplicationService.Failure failure =
+                            new IncidentDeduplicationService.Failure(
+                                    "nexusai-api",
+                                    "reliability." + event.ruleId(),
+                                    "ReliabilityAlert",
+                                    event.ruleId());
+                    try {
+                        if (event.state()
+                                == ReliabilityMonitor.State.FIRING) {
+                            server.recordFailure(
+                                    failure,
+                                    event.severity(),
+                                    "[" + event.ruleId() + "] "
+                                            + event.message());
+                        } else if (!server.resolveFailure(failure)) {
+                            AppLogger.warn(
+                                    "alert_incident_resolution_skipped",
+                                    "No active incident could be resolved for "
+                                            + event.ruleId());
+                        }
+                    } catch (SQLException exception) {
+                        throw new IllegalStateException(
+                                "Failed to persist reliability incident "
+                                        + event.ruleId(),
+                                exception
+                        );
+                    }
+                },
+                20,
+                0.05,
+                0.20
+        );
 
         ScheduledExecutorService reliabilityScheduler =
                 Executors.newSingleThreadScheduledExecutor(runnable -> {
