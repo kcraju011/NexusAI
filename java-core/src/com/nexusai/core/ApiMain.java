@@ -26,14 +26,6 @@ public class ApiMain {
                 new IncidentCorrelationService();
         IncidentDeduplicationService deduplicationService =
                 new IncidentDeduplicationService();
-        IncidentLifecycleService lifecycleService =
-                new IncidentLifecycleService();
-        IncidentRecoveryService recoveryService =
-                new IncidentRecoveryService(
-                        lifecycleService,
-                        3,
-                        Duration.ofSeconds(30)
-                );
         AuditLogger auditLogger =
         new AuditLogger(java.nio.file.Path.of("logs", "audit.jsonl"));
 
@@ -51,6 +43,15 @@ public class ApiMain {
         PostgresIncidentRepository repository =
                 new PostgresIncidentRepository(
                         url, username, password, telemetry);
+        PostgresIncidentLifecycleRepository lifecycleRepository =
+                new PostgresIncidentLifecycleRepository(
+                        url, username, password);
+        IncidentRecoveryService recoveryService =
+                new IncidentRecoveryService(
+                        lifecycleRepository,
+                        3,
+                        Duration.ofSeconds(30)
+                );
 
         MetricsRegistry metrics = new MetricsRegistry();
 
@@ -107,7 +108,7 @@ RedisRateLimiter rateLimiter =
                     authService,
                     correlationService,
                     deduplicationService,
-                    lifecycleService,
+                    lifecycleRepository,
                     incidentCache,
                     rateLimiter,
                     metrics,

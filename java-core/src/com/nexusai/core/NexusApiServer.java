@@ -46,7 +46,7 @@ public class NexusApiServer implements AutoCloseable {
     private final AuthService authService;
     private final IncidentCorrelationService correlationService;
     private final IncidentDeduplicationService deduplicationService;
-    private final IncidentLifecycleService lifecycleService;
+    private final PostgresIncidentLifecycleRepository lifecycleRepository;
     private final Map<String, String> failureIncidentIds = new HashMap<>();
     private final RedisIncidentCache incidentCache;
     private final RedisRateLimiter rateLimiter;
@@ -62,7 +62,7 @@ public class NexusApiServer implements AutoCloseable {
         AuthService authService,
         IncidentCorrelationService correlationService,
         IncidentDeduplicationService deduplicationService,
-        IncidentLifecycleService lifecycleService,
+        PostgresIncidentLifecycleRepository lifecycleRepository,
         RedisIncidentCache incidentCache,
         RedisRateLimiter rateLimiter,
         MetricsRegistry metrics,
@@ -77,7 +77,7 @@ public class NexusApiServer implements AutoCloseable {
         this.authService = authService;
         this.correlationService = correlationService;
         this.deduplicationService = deduplicationService;
-        this.lifecycleService = lifecycleService;
+        this.lifecycleRepository = lifecycleRepository;
         this.incidentCache = incidentCache;
         this.rateLimiter = rateLimiter;
         this.metrics = metrics;
@@ -402,7 +402,7 @@ public class NexusApiServer implements AutoCloseable {
             );
             repository.save(incident);
             incidentManager.reportIncident(incident);
-            lifecycleService.register(incident.getId());
+            lifecycleRepository.register(incident.getId());
         } else if (repository.updateOccurrence(
                 detection.incidentId(),
                 detection.occurrenceCount(),
@@ -434,7 +434,7 @@ public class NexusApiServer implements AutoCloseable {
             repository.save(incident);
             if (incidentWasNotInManager) {
                 incidentManager.reportIncident(incident);
-                lifecycleService.register(incident.getId());
+                lifecycleRepository.register(incident.getId());
             }
         }
 
@@ -462,6 +462,20 @@ public class NexusApiServer implements AutoCloseable {
         boolean resolved = deduplicationService.resolve(fingerprint);
         if (!resolved) {
             return false;
+        }
+
+        PostgresIncidentLifecycleRepository.State lifecycleState =
+                lifecycleRepository.getState(incidentId);
+        if (lifecycleState == null) {
+            return false;
+        }
+        if (lifecycleState.status()
+                != IncidentLifecycleService.Status.RESOLVED) {
+            lifecycleRepository.transition(
+                    incidentId,
+                    IncidentLifecycleService.Status.RESOLVED,
+                    "system-recovery",
+                    "Failure condition recovered");
         }
 
         Incident incident = incidentManager.findIncidentById(incidentId);
@@ -554,6 +568,28 @@ public class NexusApiServer implements AutoCloseable {
             }
         }
 
+        if (path.startsWith("/api/incidents/")) {
+            String suffix = path.substring("/api/incidents/".length());
+            String[] segments = suffix.split("/");
+            if (segments.length == 2 && "lifecycle".equals(segments[1])) {
+                if ("GET".equals(method)) {
+                    getIncidentLifecycle(exchange, segments[0]);
+                    return;
+                }
+            }
+            if (segments.length == 2 && "history".equals(segments[1])
+                    && "GET".equals(method)) {
+                getIncidentHistory(exchange, segments[0]);
+                return;
+            }
+            if (segments.length == 3 && "lifecycle".equals(segments[1])
+                    && "POST".equals(method)) {
+                transitionIncidentLifecycle(
+                        exchange, segments[0], segments[2], user);
+                return;
+            }
+        }
+
         if ("POST".equals(method)
                 && "/api/incidents".equals(path)) {
             createIncident(exchange, user);
@@ -617,6 +653,108 @@ public class NexusApiServer implements AutoCloseable {
         }
     }
 
+    private void getIncidentLifecycle(
+            HttpExchange exchange, String incidentId)
+            throws IOException, SQLException {
+        PostgresIncidentLifecycleRepository.State state =
+                lifecycleRepository.getState(incidentId);
+        if (state == null) {
+            sendJson(exchange, 404, error("Incident not found"));
+            return;
+        }
+        sendJson(exchange, 200, lifecycleStateJson(state));
+    }
+
+    private void getIncidentHistory(
+            HttpExchange exchange, String incidentId)
+            throws IOException, SQLException {
+        if (lifecycleRepository.getState(incidentId) == null) {
+            sendJson(exchange, 404, error("Incident not found"));
+            return;
+        }
+
+        List<String> events = new ArrayList<>();
+        for (PostgresIncidentLifecycleRepository.History event
+                : lifecycleRepository.getHistory(incidentId)) {
+            events.add("{"
+                    + "\"id\":" + event.id() + ","
+                    + "\"incidentId\":" + quote(event.incidentId()) + ","
+                    + "\"fromStatus\":"
+                    + (event.fromStatus() == null
+                            ? "null" : quote(event.fromStatus().name())) + ","
+                    + "\"toStatus\":" + quote(event.toStatus().name()) + ","
+                    + "\"actor\":" + quote(event.actor()) + ","
+                    + "\"note\":" + quote(event.note()) + ","
+                    + "\"createdAt\":" + quote(event.createdAt().toString())
+                    + "}");
+        }
+        sendJson(exchange, 200,
+                "[" + String.join(",", events) + "]");
+    }
+
+    private void transitionIncidentLifecycle(
+            HttpExchange exchange,
+            String incidentId,
+            String action,
+            AuthService.AuthenticatedUser user
+    ) throws IOException, SQLException {
+        if (lifecycleRepository.getState(incidentId) == null) {
+            sendJson(exchange, 404, error("Incident not found"));
+            return;
+        }
+
+        IncidentLifecycleService.Status target;
+        String note;
+        switch (action) {
+            case "acknowledge" -> {
+                target = IncidentLifecycleService.Status.ACKNOWLEDGED;
+                note = "Incident acknowledged";
+            }
+            case "investigate" -> {
+                target = IncidentLifecycleService.Status.INVESTIGATING;
+                note = "Root cause investigation started";
+            }
+            case "resolve" -> {
+                target = IncidentLifecycleService.Status.RESOLVED;
+                note = "Issue fixed and service recovered";
+            }
+            default -> {
+                sendJson(exchange, 404, error("Lifecycle action not found"));
+                return;
+            }
+        }
+
+        final PostgresIncidentLifecycleRepository.State state;
+        try {
+            state = lifecycleRepository.transition(
+                    incidentId, target, user.username(), note);
+        } catch (IllegalStateException exception) {
+            throw new ApiException(
+                    409, "INVALID_LIFECYCLE_TRANSITION",
+                    exception.getMessage());
+        }
+
+        auditLogger.record(
+                user.username(),
+                "INCIDENT_" + target.name(),
+                incidentId,
+                "SUCCESS");
+        sendJson(exchange, 200, lifecycleStateJson(state));
+    }
+
+    private String lifecycleStateJson(
+            PostgresIncidentLifecycleRepository.State state) {
+        return "{"
+                + "\"incidentId\":" + quote(state.incidentId()) + ","
+                + "\"status\":" + quote(state.status().name()) + ","
+                + "\"assignedTo\":"
+                + (state.assignedTo() == null
+                        ? "null" : quote(state.assignedTo())) + ","
+                + "\"createdAt\":" + quote(state.createdAt().toString()) + ","
+                + "\"updatedAt\":" + quote(state.updatedAt().toString())
+                + "}";
+    }
+
   private void createIncident(
       HttpExchange exchange,
       AuthService.AuthenticatedUser user
@@ -670,7 +808,7 @@ public class NexusApiServer implements AutoCloseable {
 
     // Update the in-memory scheduling and lookup structures.
     incidentManager.reportIncident(incident);
-    lifecycleService.register(incident.getId());
+    lifecycleRepository.register(incident.getId());
 
         auditLogger.record(
             user.username(),

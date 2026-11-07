@@ -21,12 +21,13 @@ $response = Invoke-WebRequest -Uri "http://localhost:8080/api/health"
 $response.Headers["X-Trace-Id"]
 ```
 
-The incident schema is initialized automatically for a new PostgreSQL volume.
-For an existing volume, apply the additive incident metadata columns after
-upgrading the API:
+The incident schema and lifecycle migration are initialized automatically for
+a new PostgreSQL volume. Existing volumes are not re-initialized; apply the V2
+migration without deleting the database volume:
 
 ```powershell
-docker compose exec postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -f /docker-entrypoint-initdb.d/01-schema.sql'
+Get-Content .\docs\migrations\V2__incident_lifecycle.sql -Raw |
+    docker compose exec -T postgres sh -c 'psql -U "$POSTGRES_USER" -d "$POSTGRES_DB" -v ON_ERROR_STOP=1'
 ```
 
 If `Invoke-WebRequest` reports that it cannot connect, the API is not listening

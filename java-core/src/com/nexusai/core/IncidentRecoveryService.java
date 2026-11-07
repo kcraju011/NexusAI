@@ -27,6 +27,7 @@ public class IncidentRecoveryService {
     }
 
     private final IncidentLifecycleService lifecycleService;
+    private final PostgresIncidentLifecycleRepository lifecycleRepository;
     private final int requiredSuccesses;
     private final Duration minimumRecoveryDuration;
 
@@ -38,9 +39,28 @@ public class IncidentRecoveryService {
             int requiredSuccesses,
             Duration minimumRecoveryDuration
     ) {
-        if (lifecycleService == null) {
+        this(lifecycleService, null, requiredSuccesses,
+                minimumRecoveryDuration);
+    }
+
+    public IncidentRecoveryService(
+            PostgresIncidentLifecycleRepository lifecycleRepository,
+            int requiredSuccesses,
+            Duration minimumRecoveryDuration
+    ) {
+        this(null, lifecycleRepository, requiredSuccesses,
+                minimumRecoveryDuration);
+    }
+
+    private IncidentRecoveryService(
+            IncidentLifecycleService lifecycleService,
+            PostgresIncidentLifecycleRepository lifecycleRepository,
+            int requiredSuccesses,
+            Duration minimumRecoveryDuration
+    ) {
+        if ((lifecycleService == null) == (lifecycleRepository == null)) {
             throw new IllegalArgumentException(
-                    "Lifecycle service is required"
+                    "Exactly one lifecycle persistence option is required"
             );
         }
 
@@ -58,6 +78,7 @@ public class IncidentRecoveryService {
         }
 
         this.lifecycleService = lifecycleService;
+        this.lifecycleRepository = lifecycleRepository;
         this.requiredSuccesses = requiredSuccesses;
         this.minimumRecoveryDuration = minimumRecoveryDuration;
     }
@@ -68,7 +89,7 @@ public class IncidentRecoveryService {
     ) {
         requireText(incidentId);
         requireTime(observedAt);
-        lifecycleService.getState(incidentId);
+        getLifecycleState(incidentId);
 
         RecoveryState state = states.computeIfAbsent(
                 incidentId,
@@ -102,12 +123,21 @@ public class IncidentRecoveryService {
                     );
 
             if (enoughChecks && enoughTime) {
-                lifecycleService.resolve(
-                        incidentId,
-                        "system-recovery",
-                        "Automatically resolved after consecutive "
-                                + "successful health checks"
-                );
+                if (lifecycleService != null) {
+                    lifecycleService.resolve(
+                            incidentId,
+                            "system-recovery",
+                            "Automatically resolved after consecutive "
+                                    + "successful health checks"
+                    );
+                } else {
+                    transitionLifecycle(
+                            incidentId,
+                            IncidentLifecycleService.Status.RESOLVED,
+                            "system-recovery",
+                            "Automatically resolved after consecutive "
+                                    + "successful health checks");
+                }
 
                 state.status = RecoveryStatus.RESOLVED;
 
@@ -132,7 +162,7 @@ public class IncidentRecoveryService {
     ) {
         requireText(incidentId);
         requireTime(observedAt);
-        lifecycleService.getState(incidentId);
+        getLifecycleState(incidentId);
 
         RecoveryState state = states.computeIfAbsent(
                 incidentId,
@@ -210,6 +240,40 @@ public class IncidentRecoveryService {
             throw new IllegalArgumentException(
                     "Observation time is required"
             );
+        }
+    }
+
+    private IncidentLifecycleService.Status getLifecycleState(
+            String incidentId) {
+        if (lifecycleService != null) {
+            return lifecycleService.getState(incidentId).status();
+        }
+
+        try {
+            PostgresIncidentLifecycleRepository.State state =
+                    lifecycleRepository.getState(incidentId);
+            if (state == null) {
+                throw new IllegalArgumentException(
+                        "Incident not found: " + incidentId);
+            }
+            return state.status();
+        } catch (java.sql.SQLException exception) {
+            throw new IllegalStateException(
+                    "Failed to read incident lifecycle", exception);
+        }
+    }
+
+    private void transitionLifecycle(
+            String incidentId,
+            IncidentLifecycleService.Status target,
+            String actor,
+            String note) {
+        try {
+            lifecycleRepository.transition(
+                    incidentId, target, actor, note);
+        } catch (java.sql.SQLException exception) {
+            throw new IllegalStateException(
+                    "Failed to update incident lifecycle", exception);
         }
     }
 }

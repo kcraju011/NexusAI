@@ -1,6 +1,7 @@
 
 package com.nexusai.core;
 
+import java.sql.SQLException;
 import java.time.Instant;
 import java.util.ArrayList;
 import java.util.List;
@@ -42,9 +43,33 @@ public class IncidentLifecycleService {
 
     private final ConcurrentHashMap<String, Aggregate> incidents =
             new ConcurrentHashMap<>();
+    private final PostgresIncidentLifecycleRepository repository;
+
+    public IncidentLifecycleService() {
+        this.repository = null;
+    }
+
+    public IncidentLifecycleService(
+            PostgresIncidentLifecycleRepository repository) {
+        this.repository = java.util.Objects.requireNonNull(
+                repository, "repository");
+    }
 
     public IncidentState register(String incidentId) {
         requireText(incidentId, "incidentId");
+
+        if (repository != null) {
+            try {
+                if (!repository.registerIfAbsent(incidentId)) {
+                    throw new IllegalStateException(
+                            "Incident is already registered: " + incidentId);
+                }
+                return requirePersistedState(incidentId);
+            } catch (SQLException exception) {
+                throw persistenceFailure(
+                        "Failed to register incident lifecycle", exception);
+            }
+        }
 
         Aggregate aggregate = new Aggregate();
         Aggregate existing = incidents.putIfAbsent(
@@ -110,6 +135,16 @@ public class IncidentLifecycleService {
         requireText(actor, "actor");
         requireText(note, "note");
 
+        if (repository != null) {
+            try {
+                return toState(repository.transition(
+                        incidentId, target, actor, note));
+            } catch (SQLException exception) {
+                throw persistenceFailure(
+                        "Failed to update incident lifecycle", exception);
+            }
+        }
+
         Aggregate aggregate = incidents.get(incidentId);
 
         if (aggregate == null) {
@@ -171,6 +206,16 @@ public class IncidentLifecycleService {
     }
 
     public IncidentState getState(String incidentId) {
+        requireText(incidentId, "incidentId");
+        if (repository != null) {
+            try {
+                return requirePersistedState(incidentId);
+            } catch (SQLException exception) {
+                throw persistenceFailure(
+                        "Failed to read incident lifecycle", exception);
+            }
+        }
+
         Aggregate aggregate = incidents.get(incidentId);
 
         if (aggregate == null) {
@@ -185,6 +230,29 @@ public class IncidentLifecycleService {
     }
 
     public List<HistoryEvent> getHistory(String incidentId) {
+        requireText(incidentId, "incidentId");
+        if (repository != null) {
+            try {
+                if (repository.getState(incidentId) == null) {
+                    throw new IllegalArgumentException(
+                            "Incident not found: " + incidentId);
+                }
+                return repository.getHistory(incidentId).stream()
+                        .map(event -> new HistoryEvent(
+                                event.incidentId(),
+                                event.fromStatus(),
+                                event.toStatus(),
+                                event.actor(),
+                                event.note(),
+                                event.createdAt()))
+                        .toList();
+            } catch (SQLException exception) {
+                throw persistenceFailure(
+                        "Failed to read incident lifecycle history",
+                        exception);
+            }
+        }
+
         Aggregate aggregate = incidents.get(incidentId);
 
         if (aggregate == null) {
@@ -209,6 +277,32 @@ public class IncidentLifecycleService {
                 aggregate.createdAt,
                 aggregate.updatedAt
         );
+    }
+
+    private IncidentState requirePersistedState(String incidentId)
+            throws SQLException {
+        PostgresIncidentLifecycleRepository.State state =
+                repository.getState(incidentId);
+        if (state == null) {
+            throw new IllegalArgumentException(
+                    "Incident not found: " + incidentId);
+        }
+        return toState(state);
+    }
+
+    private IncidentState toState(
+            PostgresIncidentLifecycleRepository.State state) {
+        return new IncidentState(
+                state.incidentId(),
+                state.status(),
+                state.assignedTo(),
+                state.createdAt(),
+                state.updatedAt());
+    }
+
+    private IllegalStateException persistenceFailure(
+            String message, SQLException cause) {
+        return new IllegalStateException(message, cause);
     }
 
     private void requireText(String value, String field) {

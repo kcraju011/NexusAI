@@ -11,6 +11,7 @@ services:
     volumes:
       - nexusai-postgres-data:/var/lib/postgresql/data
       - ./docs/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
+      - ./docs/migrations/V2__incident_lifecycle.sql:/docker-entrypoint-initdb.d/02-incident-lifecycle.sql:ro
     healthcheck:
       test:
         - CMD-SHELL

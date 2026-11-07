@@ -63,8 +63,11 @@ public class NexusApiServerTest {
                 "test-viewer", "test-viewer-password");
 
         IncidentManager manager = new IncidentManager();
-        IncidentLifecycleService lifecycleService =
-                new IncidentLifecycleService();
+        PostgresIncidentLifecycleRepository lifecycleRepository =
+                new PostgresIncidentLifecycleRepository(
+                        requiredEnv("NEXUS_DB_URL"),
+                        requiredEnv("NEXUS_DB_USER"),
+                        requiredEnv("NEXUS_DB_PASSWORD"));
         ServiceGraph graph = new ServiceGraph();
 
         graph.addService("S001");
@@ -101,7 +104,7 @@ public class NexusApiServerTest {
                              repository, authService,
                              new IncidentCorrelationService(),
                              new IncidentDeduplicationService(),
-                             lifecycleService,
+                             lifecycleRepository,
                              incidentCache, rateLimiter,
                              new MetricsRegistry(),
                              telemetry)) {
@@ -177,9 +180,67 @@ public class NexusApiServerTest {
 
             check(created.body().contains("\"serviceId\":\"S001\""),
                     "Response should contain service ID");
-            check(lifecycleService.getState(incidentId).status()
+            check(lifecycleRepository.getState(incidentId).status()
                             == IncidentLifecycleService.Status.OPEN,
                     "Created incident should be registered as open");
+
+            HttpResponse<String> acknowledged = request(
+                    client, baseUrl, "POST",
+                    "/api/incidents/" + incidentId
+                            + "/lifecycle/acknowledge",
+                    null, adminToken);
+            check(acknowledged.statusCode() == 200
+                            && acknowledged.body().contains(
+                                    "\"status\":\"ACKNOWLEDGED\"")
+                            && acknowledged.body().contains(
+                                    "\"assignedTo\":\"test-admin\""),
+                    "Acknowledgement should persist the authenticated actor");
+
+            HttpResponse<String> investigating = request(
+                    client, baseUrl, "POST",
+                    "/api/incidents/" + incidentId
+                            + "/lifecycle/investigate",
+                    null, adminToken);
+            check(investigating.statusCode() == 200
+                            && investigating.body().contains(
+                                    "\"status\":\"INVESTIGATING\""),
+                    "Investigation should transition the lifecycle");
+
+            HttpResponse<String> resolved = request(
+                    client, baseUrl, "POST",
+                    "/api/incidents/" + incidentId
+                            + "/lifecycle/resolve",
+                    null, adminToken);
+            check(resolved.statusCode() == 200
+                            && resolved.body().contains(
+                                    "\"status\":\"RESOLVED\""),
+                    "Resolution should transition the lifecycle");
+
+            HttpResponse<String> lifecycle = request(
+                    client, baseUrl, "GET",
+                    "/api/incidents/" + incidentId + "/lifecycle",
+                    null, adminToken);
+            check(lifecycle.statusCode() == 200
+                            && lifecycle.body().contains(
+                                    "\"status\":\"RESOLVED\""),
+                    "Lifecycle status should be loaded from PostgreSQL");
+
+            HttpResponse<String> history = request(
+                    client, baseUrl, "GET",
+                    "/api/incidents/" + incidentId + "/history",
+                    null, adminToken);
+            check(history.statusCode() == 200
+                            && history.body().contains(
+                                    "\"toStatus\":\"OPEN\"")
+                            && history.body().contains(
+                                    "\"toStatus\":\"ACKNOWLEDGED\"")
+                            && history.body().contains(
+                                    "\"toStatus\":\"INVESTIGATING\"")
+                            && history.body().contains(
+                                    "\"toStatus\":\"RESOLVED\"")
+                            && history.body().contains(
+                                    "\"actor\":\"test-admin\""),
+                    "PostgreSQL should preserve lifecycle transition history");
 
             String correlationPath =
                     "/api/incidents/" + incidentId + "/correlation";
