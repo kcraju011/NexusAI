@@ -63,6 +63,8 @@ public class NexusApiServerTest {
                 "test-viewer", "test-viewer-password");
 
         IncidentManager manager = new IncidentManager();
+        IncidentLifecycleService lifecycleService =
+                new IncidentLifecycleService();
         ServiceGraph graph = new ServiceGraph();
 
         graph.addService("S001");
@@ -99,6 +101,7 @@ public class NexusApiServerTest {
                              repository, authService,
                              new IncidentCorrelationService(),
                              new IncidentDeduplicationService(),
+                             lifecycleService,
                              incidentCache, rateLimiter,
                              new MetricsRegistry(),
                              telemetry)) {
@@ -174,6 +177,9 @@ public class NexusApiServerTest {
 
             check(created.body().contains("\"serviceId\":\"S001\""),
                     "Response should contain service ID");
+            check(lifecycleService.getState(incidentId).status()
+                            == IncidentLifecycleService.Status.OPEN,
+                    "Created incident should be registered as open");
 
             String correlationPath =
                     "/api/incidents/" + incidentId + "/correlation";

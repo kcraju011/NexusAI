@@ -46,6 +46,7 @@ public class NexusApiServer implements AutoCloseable {
     private final AuthService authService;
     private final IncidentCorrelationService correlationService;
     private final IncidentDeduplicationService deduplicationService;
+    private final IncidentLifecycleService lifecycleService;
     private final Map<String, String> failureIncidentIds = new HashMap<>();
     private final RedisIncidentCache incidentCache;
     private final RedisRateLimiter rateLimiter;
@@ -61,6 +62,7 @@ public class NexusApiServer implements AutoCloseable {
         AuthService authService,
         IncidentCorrelationService correlationService,
         IncidentDeduplicationService deduplicationService,
+        IncidentLifecycleService lifecycleService,
         RedisIncidentCache incidentCache,
         RedisRateLimiter rateLimiter,
         MetricsRegistry metrics,
@@ -75,6 +77,7 @@ public class NexusApiServer implements AutoCloseable {
         this.authService = authService;
         this.correlationService = correlationService;
         this.deduplicationService = deduplicationService;
+        this.lifecycleService = lifecycleService;
         this.incidentCache = incidentCache;
         this.rateLimiter = rateLimiter;
         this.metrics = metrics;
@@ -399,6 +402,7 @@ public class NexusApiServer implements AutoCloseable {
             );
             repository.save(incident);
             incidentManager.reportIncident(incident);
+            lifecycleService.register(incident.getId());
         } else if (repository.updateOccurrence(
                 detection.incidentId(),
                 detection.occurrenceCount(),
@@ -430,6 +434,7 @@ public class NexusApiServer implements AutoCloseable {
             repository.save(incident);
             if (incidentWasNotInManager) {
                 incidentManager.reportIncident(incident);
+                lifecycleService.register(incident.getId());
             }
         }
 
@@ -665,6 +670,7 @@ public class NexusApiServer implements AutoCloseable {
 
     // Update the in-memory scheduling and lookup structures.
     incidentManager.reportIncident(incident);
+    lifecycleService.register(incident.getId());
 
         auditLogger.record(
             user.username(),

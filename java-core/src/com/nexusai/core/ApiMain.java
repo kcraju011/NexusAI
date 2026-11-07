@@ -23,6 +23,8 @@ public class ApiMain {
                 new IncidentCorrelationService();
         IncidentDeduplicationService deduplicationService =
                 new IncidentDeduplicationService();
+        IncidentLifecycleService lifecycleService =
+                new IncidentLifecycleService();
         AuditLogger auditLogger =
         new AuditLogger(java.nio.file.Path.of("logs", "audit.jsonl"));
 
@@ -96,6 +98,7 @@ RedisRateLimiter rateLimiter =
                     authService,
                     correlationService,
                     deduplicationService,
+                    lifecycleService,
                     incidentCache,
                     rateLimiter,
                     metrics,
