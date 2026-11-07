@@ -2,9 +2,12 @@ package com.nexusai.core;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.time.Duration;
+import java.time.Instant;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 public class ApiMain {
 
@@ -25,6 +28,12 @@ public class ApiMain {
                 new IncidentDeduplicationService();
         IncidentLifecycleService lifecycleService =
                 new IncidentLifecycleService();
+        IncidentRecoveryService recoveryService =
+                new IncidentRecoveryService(
+                        lifecycleService,
+                        3,
+                        Duration.ofSeconds(30)
+                );
         AuditLogger auditLogger =
         new AuditLogger(java.nio.file.Path.of("logs", "audit.jsonl"));
 
@@ -166,6 +175,16 @@ RedisRateLimiter rateLimiter =
                     return thread;
                 });
 
+        IncidentDeduplicationService.Failure databaseHealthFailure =
+                new IncidentDeduplicationService.Failure(
+                        "nexusai-api",
+                        "postgres.health_check",
+                        "SQLException",
+                        "DATABASE_HEALTH_CHECK_FAILED"
+                );
+        AtomicReference<String> databaseIncidentId =
+                new AtomicReference<>();
+
         reliabilityScheduler.scheduleWithFixedDelay(
                 () -> {
                     try {
@@ -176,6 +195,13 @@ RedisRateLimiter rateLimiter =
                                         + exception.getMessage()
                         );
                     }
+                    checkDatabaseHealth(
+                            repository,
+                            server,
+                            recoveryService,
+                            databaseHealthFailure,
+                            databaseIncidentId
+                    );
                 },
                 15,
                 15,
@@ -203,6 +229,75 @@ RedisRateLimiter rateLimiter =
         System.out.println(
                 "NexusAI API running at http://localhost:8080");
         }
+
+    private static void checkDatabaseHealth(
+            PostgresIncidentRepository repository,
+            NexusApiServer server,
+            IncidentRecoveryService recoveryService,
+            IncidentDeduplicationService.Failure failure,
+            AtomicReference<String> incidentId
+    ) {
+        try {
+            repository.count();
+        } catch (SQLException healthCheckFailure) {
+            try {
+                IncidentDeduplicationService.Detection detection =
+                        server.recordFailure(
+                                failure,
+                                Incident.Severity.HIGH,
+                                "Database health check failed: "
+                                        + healthCheckFailure.getMessage()
+                        );
+                incidentId.set(detection.incidentId());
+                recoveryService.recordFailure(
+                        detection.incidentId(),
+                        Instant.now()
+                );
+            } catch (SQLException incidentFailure) {
+                if (healthCheckFailure != incidentFailure) {
+                    incidentFailure.addSuppressed(healthCheckFailure);
+                }
+                AppLogger.error(
+                        "database_health_incident_record_failed",
+                        "Database health check failed and its incident "
+                                + "could not be recorded",
+                        incidentFailure
+                );
+            }
+            return;
+        }
+
+        String activeIncidentId = incidentId.get();
+        if (activeIncidentId == null) {
+            return;
+        }
+
+        IncidentRecoveryService.RecoveryResult recovery =
+                recoveryService.recordSuccess(
+                        activeIncidentId,
+                        Instant.now()
+                );
+        if (recovery.status()
+                == IncidentRecoveryService.RecoveryStatus.RESOLVED) {
+            try {
+                if (server.resolveFailure(failure)) {
+                    incidentId.compareAndSet(activeIncidentId, null);
+                } else {
+                    AppLogger.warn(
+                            "database_health_incident_resolution_pending",
+                            "Recovery confirmed but the incident record "
+                                    + "could not be marked resolved"
+                    );
+                }
+            } catch (SQLException resolutionFailure) {
+                AppLogger.error(
+                        "database_health_incident_resolution_failed",
+                        "Recovery confirmed but incident persistence failed",
+                        resolutionFailure
+                );
+            }
+        }
+    }
 
         private static String requiredEnv(String name) {
                 String value = System.getenv(name);
